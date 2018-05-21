@@ -1,0 +1,4 @@
+[run]
+branch = true
+source = sphinx_exhibit
+omit = **/_version.py
