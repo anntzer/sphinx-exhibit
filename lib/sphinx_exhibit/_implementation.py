@@ -1,9 +1,13 @@
+# FIXME: Backreferences (as a rst directive) (perhaps from hunter?).
+# FIXME: Generate notebook from the rst-generated html.
+
 import ast
 import copy
 import itertools
 from lib2to3 import pygram
 import re
 from pathlib import Path
+import shutil
 import textwrap
 import tokenize
 import warnings
@@ -18,7 +22,7 @@ import sphinx
 from sphinx.builders.dummy import DummyBuilder
 from sphinx.environment import BuildEnvironment
 
-from . import _parser, __version__
+from . import _parser, _util, __version__
 
 mpl.backend_bases.FigureManagerBase.show = lambda self: None
 plt.switch_backend("agg")
@@ -53,55 +57,64 @@ def gen_exhibits(app):
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
 
 
-def _split_strings_and_codes(src):
+def split_text_and_code_blocks(src):
     tree = _parser.parse(src)
-    for i, node in enumerate(tree.children):
-        if (node.type == pygram.python_symbols.simple_stmt
-                and node.children[0].type == pygram.token.STRING
-                # Exclude b- or f-strings, but not r-strings.
-                and not re.search(
-                    r"""\A[^'"]*[bBfF]""", node.children[0].value)):
-            # This is never the last node.
-            tree.children[i + 1].prefix = (
-                node.prefix + tree.children[i + 1].prefix)
-            yield ("string",
-                   ast.literal_eval(
-                       "".join(leaf.value for leaf in node.leaves())))
-        else:
-            yield ("code", node)
+
+    def _inner():
+        for i, node in enumerate(tree.children):
+            if (node.type == pygram.python_symbols.simple_stmt
+                    and node.children[0].type == pygram.token.STRING
+                    # Exclude b- or f-strings, but not r-strings.
+                    and not re.search(
+                        r"""\A[^'"]*[bBfF]""", node.children[0].value)):
+                # This is never the last node.
+                tree.children[i + 1].prefix = (
+                    node.prefix + tree.children[i + 1].prefix)
+                yield ("text",
+                       ast.literal_eval(
+                           "".join(leaf.value for leaf in node.leaves())),
+                       node.get_lineno())
+            else:
+                yield ("code", str(node), node.get_lineno())
+
+    for tp, it_group in itertools.groupby(_inner(), lambda kv: kv[0]):
+        _, strs, linenos = zip(*it_group)
+        yield tp, "".join(strs), linenos[0]
 
 
-def generate_rst(src_path):
-    with tokenize.open(src_path) as file:
-        src = file.read()
+def generate_rst(src_path, *, sg_style=False):
+
+    if sg_style:
+        from sphinx_gallery.py_source_parser import (
+            split_code_and_text_blocks as sg_split_text_and_code_blocks)
+        _, text_and_code_blocks = sg_split_text_and_code_blocks(src_path)
+    else:
+        with tokenize.open(src_path) as file:
+            src = file.read()
+        text_and_code_blocks = split_text_and_code_blocks(src)
+
     paragraphs = []
     block_counter = itertools.count()
     capture_after_lines = []
-    for tp, it_group in itertools.groupby(
-            _split_strings_and_codes(src), lambda kv: kv[0]):
-        it_group = list(item for tp, item in it_group)
-        group = "".join(map(str, it_group)).strip()
-        if tp == "string":
-            paragraphs.append(group)
+    for tp, string, lineno in text_and_code_blocks:
+        if tp == "text":
+            paragraphs.append(string)
         elif tp == "code":
-            if not group.strip():
+            if not string.strip():
                 # Don't generate a code-block if the file ends with text.
                 continue
-            capture_after_lines.append(it_group[-1].get_lineno())
-            group = textwrap.indent(group, "   ")
-            # TODO Don't duplicate the source, instead run the correct source
-            # but after inserting the call to `_sphinx_exhibit_export_` at the
-            # ast level... using a custom importer and runpy.run_path.
+            capture_after_lines.append(lineno + string.count("\n") - 1)
             paragraphs.append(".. exhibit-block:: {}"
                               .format(next(block_counter)))
-            paragraphs.append(group)
+            paragraphs.append(textwrap.indent(string, "   "))
         else:
             raise AssertionError
+
     return (_deletion_notice
             + ":orphan:\n"
             + "\n"
             + ".. exhibit-source::\n"
-            # FIXME Relative path here?
+            # FIXME: Relative path here?
             + "   :source: {}\n".format(src_path)
             + "   :capture-after-lines: {}\n".format(
                 " ".join(map(str, capture_after_lines)))
@@ -113,6 +126,7 @@ class ExhibitBase(rst.Directive):
     option_spec = {
         "srcdir": rst.directives.unchanged,
         "destdir": rst.directives.unchanged,
+        "sphinx-gallery": rst.directives.flag,
     }
     has_content = True
 
@@ -145,7 +159,7 @@ class ExhibitBase(rst.Directive):
         dest_dir = cur_dir / self.options["destdir"]
         return [(src_path,
                  (dest_dir / src_path.relative_to(src_dir))
-                 # FIXME Respect suffixes.
+                 # FIXME: Respect suffixes.
                  .with_suffix(".rst"))
                 for src_path in src_paths]
 
@@ -154,7 +168,11 @@ class ExhibitAsGenerator(ExhibitBase):
     def run(self):
         for src_path, dest_path in self.get_src_and_dest_paths():
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-            dest_path.write_text(generate_rst(src_path))
+            dest_path.write_text(
+                generate_rst(
+                    src_path, sg_style="sphinx-gallery" in self.options))
+            # FIXME: Also arrange to delete this file.
+            shutil.copyfile(src_path, dest_path.parent / src_path.name)
         return []
 
 
@@ -200,12 +218,14 @@ class ExhibitSource(rst.Directive):
                 plt.figure(fignum).savefig("{}-{}-{}.png".format(
                     self.state.document.current_source,
                     block_idx, fig_idx))
-            # FIXME Make this configurable?
+            # FIXME: Make this configurable?
             plt.close("all")
 
-        # Prevent Matplotlib's cleanup decorator from destroying the
-        # warnings filters.
-        with warnings.catch_warnings():
+        # FIXME: chdir is only for SG compatibility.
+        # Prevent Matplotlib's cleanup decorator from destroying the warnings
+        # filters.
+        with _util.chdir_cm(Path(self.options["source"]).parent), \
+                warnings.catch_warnings():
             mpl.testing.decorators.cleanup("default")(lambda: exec(
                 code, {"_sphinx_exhibit_export_": _sphinx_exhibit_export_}))()
         return []
