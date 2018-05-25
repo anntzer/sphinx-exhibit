@@ -1,4 +1,5 @@
 import ast
+import copy
 import itertools
 from lib2to3 import pygram
 import re
@@ -21,6 +22,7 @@ from . import _parser, __version__
 
 mpl.backend_bases.FigureManagerBase.show = lambda self: None
 plt.switch_backend("agg")
+_log = sphinx.util.logging.getLogger(__name__.split(".")[0])
 
 
 def gen_gallery(app):
@@ -36,7 +38,7 @@ def gen_gallery(app):
         for directive in directives:
             docutils.core.publish_doctree(directive, source_path=path)
     rst.directives.register_directive("exhibit", ExhibitAsRunner)
-    rst.directives.register_directive("exhibit-full-source", ExhibitFullSource)
+    rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
 
 
@@ -55,21 +57,26 @@ def _split_strings_and_codes(src):
                    ast.literal_eval(
                        "".join(leaf.value for leaf in node.leaves())))
         else:
-            yield ("code", str(node))
+            yield ("code", node)
 
 
 def generate_rst(src_path):
     with tokenize.open(src_path) as file:
         src = file.read()
     paragraphs = []
-    codeblocks = []
     block_counter = itertools.count()
+    capture_after_lines = []
     for tp, it_group in itertools.groupby(
             _split_strings_and_codes(src), lambda kv: kv[0]):
-        group = "".join(st for tp, st in it_group).strip()
+        it_group = list(item for tp, item in it_group)
+        group = "".join(map(str, it_group)).strip()
         if tp == "string":
             paragraphs.append(group)
         elif tp == "code":
+            if not group.strip():
+                # Don't generate a code-block if the file ends with text.
+                continue
+            capture_after_lines.append(it_group[-1].get_lineno())
             group = textwrap.indent(group, "   ")
             # TODO Don't duplicate the source, instead run the correct source
             # but after inserting the call to `_sphinx_exhibit_export_` at the
@@ -77,16 +84,16 @@ def generate_rst(src_path):
             paragraphs.append(".. exhibit-block:: {}"
                               .format(next(block_counter)))
             paragraphs.append(group)
-            codeblocks.append(group)
-            codeblocks.append(
-                "\n\n"
-                "   globals().get('_sphinx_exhibit_export_', lambda: None)()\n")
         else:
             raise AssertionError
-    return (":orphan:\n\n"
-            + ".. exhibit-full-source::\n\n"
-            + "".join(codeblocks)
-            + "\n\n"
+    return (":orphan:\n"
+            + "\n"
+            + ".. exhibit-source::\n"
+            # FIXME Relative path here?
+            + "   :source: {}\n".format(src_path)
+            + "   :capture-after-lines: {}\n".format(
+                " ".join(map(str, capture_after_lines)))
+            + "\n"
             + "\n\n".join(paragraphs))
 
 
@@ -97,25 +104,37 @@ class ExhibitBase(rst.Directive):
     }
     has_content = True
 
+    def get_cur_dir(self):
+        return Path(self.state.document.current_source).parent
+
     def get_src_and_dest_paths(self):
-        curdir = Path(self.state.document.current_source).parent
-        srcdir = curdir / self.options["srcdir"]
+        cur_dir = self.get_cur_dir()
+        src_dir = cur_dir / self.options["srcdir"]
         src_paths = []
         for line in self.content:
             if line.startswith("!"):
-                for excluded in srcdir.glob(line[1:]):
+                excluded = sorted(src_dir.glob(line[1:]))
+                _log.info("expanding (for removal) %s to %s.",
+                          line, " ".join(str(path.relative_to(src_dir))
+                                         for path in excluded))
+                for path in excluded:
                     try:
-                        src_paths.remove(excluded)
+                        src_paths.remove(path)
                     except ValueError:
                         pass
             else:
                 if line.startswith(r"\!"):
                     line = line[1:]
-                src_paths.extend(sorted(srcdir.glob(line)))
-        destdir = curdir / self.options["destdir"]
+                added = sorted(src_dir.glob(line))
+                _log.info("expanding (for addition) %s to %s.",
+                          line, " ".join(str(path.relative_to(src_dir))
+                                         for path in added))
+                src_paths.extend(added)
+        dest_dir = cur_dir / self.options["destdir"]
         return [(src_path,
+                 (dest_dir / src_path.relative_to(src_dir))
                  # FIXME Respect suffixes.
-                 (destdir / src_path.relative_to(srcdir)).with_suffix(".rst"))
+                 .with_suffix(".rst"))
                 for src_path in src_paths]
 
 
@@ -129,10 +148,10 @@ class ExhibitAsGenerator(ExhibitBase):
 
 class ExhibitAsRunner(ExhibitBase):
     def run(self):
-        doc_dir = Path(self.state.document.current_source).parent
+        cur_dir = self.get_cur_dir()
         vl = ViewList([
             "* :doc:`{}`".format(
-                dest_path.relative_to(doc_dir).with_suffix(""))
+                dest_path.relative_to(cur_dir).with_suffix(""))
             for src_path, dest_path in self.get_src_and_dest_paths()
         ])
         node = rst.nodes.Element()
@@ -140,26 +159,43 @@ class ExhibitAsRunner(ExhibitBase):
         return node.children
 
 
-class ExhibitFullSource(rst.Directive):
+class ExhibitSource(rst.Directive):
+    option_spec = {
+        "source": rst.directives.unchanged,
+        "capture-after-lines": rst.directives.positive_int_list,
+    }
     has_content = True
 
     def run(self):
+        with tokenize.open(self.options["source"]) as file:
+            mod = ast.parse(file.read())
+        body = [(stmt.lineno, stmt) for stmt in mod.body]
+        inserted = ast.parse("_sphinx_exhibit_export_()").body[0]
+        insertions = []
+        for lineno in self.options["capture-after-lines"]:
+            stmt = copy.deepcopy(inserted)
+            ast.increment_lineno(stmt, lineno - 1)
+            insertions.append((lineno + .5, stmt))
+        mod.body = [stmt for lineno, stmt in sorted(body + insertions,
+                                                    key=lambda kv: kv[0])]
+        code = compile(mod, self.options["source"], "exec")
+
         block_counter = itertools.count()
 
         def _sphinx_exhibit_export_():
+            block_idx = next(block_counter)
             for fig_idx, fignum in enumerate(plt.get_fignums()):
                 plt.figure(fignum).savefig("{}-{}-{}.png".format(
                     self.state.document.current_source,
-                    next(block_counter),
-                    fig_idx))
+                    block_idx, fig_idx))
+            # FIXME Make this configurable?
+            plt.close("all")
 
-        # Prevent Matplotlib's cleanup decorator from destrying the
+        # Prevent Matplotlib's cleanup decorator from destroying the
         # warnings filters.
         with warnings.catch_warnings():
-            mpl.testing.decorators.cleanup("default")(
-                lambda: exec(
-                    "\n".join(self.content),
-                    {"_sphinx_exhibit_export_": _sphinx_exhibit_export_}))()
+            mpl.testing.decorators.cleanup("default")(lambda: exec(
+                code, {"_sphinx_exhibit_export_": _sphinx_exhibit_export_}))()
         return []
 
 
