@@ -11,8 +11,8 @@ S-G examples
 ============
 
 .. exhibit::
-   :srcdir: ../sg-examples
+   :srcdir: ..
    :destdir: examples
    :sphinx-gallery:
 
-   *.py
+   sg-examples/*.py

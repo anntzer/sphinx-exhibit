@@ -1,3 +1,5 @@
+# FIXME: Output capture.
+#
 # FIXME: Backreferences (as a rst directive) (perhaps from hunter?).
 # FIXME: Generate notebook from the rst-generated html.
 
@@ -48,7 +50,7 @@ def gen_exhibits(app):
         else:
             exhibits.extend(
                 (path, match) for match in re.findall(
-                    r"(?ms)^\.\.\s+exhibit::\n(?:\s.*\n)+", contents))
+                    r"(?m)^\.\.\s+exhibit::\n(?:^(?:[ \t\f\v].*)?\n)+", contents))
     # Generation must happen after all the unlinking is done.
     for path, match in exhibits:
         docutils.core.publish_doctree(match, source_path=path)
@@ -122,6 +124,23 @@ def generate_rst(src_path, *, sg_style=False):
             + "\n\n".join(paragraphs))
 
 
+class SphinxLessDirGetter:
+    def get_current_source(self):
+        # As long as Sphinx is not set up, we can retrive the current source
+        # from current_source (and settings.env doesn't exist yet).
+        return Path(self.state.document.current_source)
+
+
+class SphinxFullDirGetter:
+    def get_current_source(self):
+        # Once Sphinx is set up, we can retrieve the current source from
+        # settings.env.docname; moreover, current_source becomes sometimes
+        # invalid because Sphinx may insert elements with a source of
+        # <generated>, <rst_prolog>, <rst_epilog>, etc.
+        env = self.state.document.settings.env
+        return Path(env.doc2path(env.docname))
+
+
 class ExhibitBase(rst.Directive):
     option_spec = {
         "srcdir": rst.directives.unchanged,
@@ -130,11 +149,8 @@ class ExhibitBase(rst.Directive):
     }
     has_content = True
 
-    def get_cur_dir(self):
-        return Path(self.state.document.current_source).parent
-
     def get_src_and_dest_paths(self):
-        cur_dir = self.get_cur_dir()
+        cur_dir = self.get_current_source().parent
         src_dir = cur_dir / self.options["srcdir"]
         src_paths = []
         for line in self.content:
@@ -164,7 +180,7 @@ class ExhibitBase(rst.Directive):
                 for src_path in src_paths]
 
 
-class ExhibitAsGenerator(ExhibitBase):
+class ExhibitAsGenerator(SphinxLessDirGetter, ExhibitBase):
     def run(self):
         for src_path, dest_path in self.get_src_and_dest_paths():
             dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,9 +192,9 @@ class ExhibitAsGenerator(ExhibitBase):
         return []
 
 
-class ExhibitAsRunner(ExhibitBase):
+class ExhibitAsRunner(SphinxFullDirGetter, ExhibitBase):
     def run(self):
-        cur_dir = self.get_cur_dir()
+        cur_dir = self.get_current_source().parent
         vl = ViewList([
             "* :doc:`{}`".format(
                 dest_path.relative_to(cur_dir).with_suffix(""))
@@ -189,7 +205,7 @@ class ExhibitAsRunner(ExhibitBase):
         return node.children
 
 
-class ExhibitSource(rst.Directive):
+class ExhibitSource(SphinxFullDirGetter, rst.Directive):
     option_spec = {
         "source": rst.directives.unchanged,
         "capture-after-lines": rst.directives.positive_int_list,
@@ -202,7 +218,7 @@ class ExhibitSource(rst.Directive):
         body = [(stmt.lineno, stmt) for stmt in mod.body]
         inserted = ast.parse("_sphinx_exhibit_export_()").body[0]
         insertions = []
-        for lineno in self.options["capture-after-lines"]:
+        for lineno in self.options["capture-after-lines"] or []:  # Not None.
             stmt = copy.deepcopy(inserted)
             ast.increment_lineno(stmt, lineno - 1)
             insertions.append((lineno + .5, stmt))
@@ -216,8 +232,7 @@ class ExhibitSource(rst.Directive):
             block_idx = next(block_counter)
             for fig_idx, fignum in enumerate(plt.get_fignums()):
                 plt.figure(fignum).savefig("{}-{}-{}.png".format(
-                    self.state.document.current_source,
-                    block_idx, fig_idx))
+                    self.get_current_source(), block_idx, fig_idx))
             # FIXME: Make this configurable?
             plt.close("all")
 
@@ -231,13 +246,13 @@ class ExhibitSource(rst.Directive):
         return []
 
 
-class ExhibitBlock(rst.Directive):
+class ExhibitBlock(SphinxFullDirGetter, rst.Directive):
     required_arguments = 1
     has_content = True
 
     def run(self):
         dest_and_block = Path("{}-{}".format(
-            self.state.document.current_source, self.arguments[0]))
+            self.get_current_source(), self.arguments[0]))
         paths = [path for path in dest_and_block.parent.iterdir()
                  if re.fullmatch(re.escape(dest_and_block.name) + "-\d*.png",
                                  path.name)]
