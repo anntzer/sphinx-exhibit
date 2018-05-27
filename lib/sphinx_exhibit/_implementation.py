@@ -81,6 +81,9 @@ def builder_inited(app):
         except FileNotFoundError:  # Could have been deleted just above.
             continue
         if re.search(r"\.\.\s+exhibit::\n", contents):
+            # state.document.current_source may lose track of the original
+            # document (e.g. when generating contents with .. jinja::), so
+            # stash the docname in the env.
             env.prepare_settings(docname)
             docutils.core.publish_doctree(
                 contents, source_path=path, settings_overrides={"env": env})
@@ -166,18 +169,7 @@ class SourceGetterMixin(rst.Directive):
     def get_current_source(self):
         env = self.state.document.settings.env
         e_state = env.exhibit_state
-        if e_state.stage is Stage.RstGeneration:
-            # As long as Sphinx is not set up, we can retrive the current
-            # source from current_source (and settings.env doesn't exist yet).
-            return Path(self.state.document.current_source)
-        elif e_state.stage is Stage.RstGenerated:
-            # Once Sphinx is set up, we can retrieve the current source from
-            # settings.env.docname; moreover, current_source becomes sometimes
-            # invalid because Sphinx may insert elements with a source of
-            # <generated>, <rst_prolog>, <rst_epilog>, etc.
-            return Path(env.doc2path(env.docname))
-        else:
-            assert False
+        return Path(env.doc2path(env.docname))
 
 
 class Exhibit(SourceGetterMixin):
@@ -196,6 +188,10 @@ class Exhibit(SourceGetterMixin):
         for line in self.content:
             if line.startswith("!"):
                 excluded = sorted(src_dir.glob(line[1:]))
+                _log.info("expanding (for removal) %s (in %s) to %s.",
+                          line, src_dir,
+                          " ".join(str(path.relative_to(src_dir))
+                                   for path in excluded))
                 for path in excluded:
                     try:
                         src_paths.remove(path)
@@ -205,6 +201,10 @@ class Exhibit(SourceGetterMixin):
                 if line.startswith(r"\!"):
                     line = line[1:]
                 added = sorted(src_dir.glob(line))
+                _log.info("expanding (for addition) %s (in %s) to %s.",
+                          line, src_dir,
+                          " ".join(str(path.relative_to(src_dir))
+                                   for path in added))
                 src_paths.extend(added)
         dest_dir = cur_dir / self.options["destdir"]
         return [(src_path,
@@ -248,15 +248,14 @@ class Exhibit(SourceGetterMixin):
 class ExhibitSource(SourceGetterMixin):
     option_spec = {
         "source": rst.directives.unchanged_required,
-        "capture-after-lines": rst.directives.positive_int_list,
+        "capture-after-lines":
+            lambda s: rst.directives.positive_int_list(s) if s else [],
         "output-style": Style,
     }
     has_content = True
 
     def run(self):
         self.options.setdefault("output-style", Style.Native)
-        self.options["capture-after-lines"] = (  # Not None.
-            self.options["capture-after-lines"] or [])
 
         e_state = self.state.document.settings.env.exhibit_state
         block_dests = e_state.path_artefacts[self.get_current_source()] = [
@@ -306,6 +305,7 @@ class ExhibitSource(SourceGetterMixin):
 
         # FIXME: chdir is only for SG compatibility.
         # FIXME: Also patch sys.argv.
+        # FIXME: runpy + override source_to_code in a custom importer.
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
         try:
@@ -314,7 +314,8 @@ class ExhibitSource(SourceGetterMixin):
                 mpl.testing.decorators.cleanup("default")(lambda: exec(
                     code,
                     {"_sphinx_exhibit_export_": _sphinx_exhibit_export_,
-                     "__file__": self.options["source"]}))()
+                     "__file__": self.options["source"],
+                     "__name__": "__main__"}))()
         # FIXME: Report error.
         except (Exception, SystemExit):
             pass
@@ -344,5 +345,6 @@ def setup(app):
     app.connect("builder-inited", builder_inited)
     app.connect("env-merge-info", env_merge_info)
     return {"version": __version__,
+            "env_version": 0,
             "parallel_read_safe": True,
             "parallel_write_safe": True}
