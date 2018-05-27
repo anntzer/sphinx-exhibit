@@ -3,6 +3,8 @@
 #
 # FIXME: Backreferences (as a rst directive) (perhaps from hunter?).
 # FIXME: Generate notebook from the rst-generated html.
+#
+# FIXME: Upstream fix to sphinx-jinja.
 
 import ast
 from collections import namedtuple
@@ -57,23 +59,21 @@ def builder_inited(app):
     env = BuildEnvironment(app)
     env.exhibit_state = State(Stage.RstGeneration)
     env.find_files(app.config, DummyBuilder(app))
-    # Sphinx's registry API warns on overwrite, but we explicitly rely on
-    # overwriting the exhibit directive.
-    rst.directives.register_directive("exhibit", Exhibit)
     exhibits = []
-    for path in map(Path, map(env.doc2path, env.found_docs)):
+    for docname in env.found_docs:
+        path = Path(env.doc2path(docname))
         contents = path.read_text()
         if contents.startswith(_deletion_notice):
             path.unlink()
-        else:
-            exhibits.extend(
-                (path, match) for match in re.findall(
-                    r"(?m)^\.\.\s+exhibit::\n(?:^(?:[ \t\f\v].*)?\n)+",
-                    contents))
     # Generation must happen after all the unlinking is done.
-    for path, match in exhibits:
-        docutils.core.publish_doctree(
-            match, source_path=path, settings_overrides={"env": env})
+    rst.directives.register_directive("exhibit", Exhibit)
+    for docname in env.found_docs:
+        path = Path(env.doc2path(docname))
+        contents = path.read_text()
+        if re.search(r"\.\.\s+exhibit::\n", contents):
+            env.prepare_settings(docname)
+            docutils.core.publish_doctree(
+                contents, source_path=path, settings_overrides={"env": env})
     app.env.exhibit_state = State(Stage.RstGenerated)
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
