@@ -13,6 +13,7 @@ S-G examples
 .. exhibit::
    :srcdir: ..
    :destdir: examples
-   :sphinx-gallery:
+   :syntax-style: sphinx-gallery
+   :output-style: sphinx-gallery
 
    sg-examples/*.py

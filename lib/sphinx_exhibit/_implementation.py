@@ -1,10 +1,13 @@
 # FIXME: Output capture.
+# FIXME: Patch AbstractMovieWriter.saving.
 #
 # FIXME: Backreferences (as a rst directive) (perhaps from hunter?).
 # FIXME: Generate notebook from the rst-generated html.
 
 import ast
+from collections import namedtuple
 import copy
+from enum import Enum
 import itertools
 from lib2to3 import pygram
 import re
@@ -36,12 +39,27 @@ _deletion_notice = """\
 """
 
 
-def gen_exhibits(app):
+class Stage(Enum):
+    RstGeneration, RstGenerated = range(2)
+
+
+class Style(Enum):
+    Native = "native"
+    SG = "sphinx-gallery"
+
+
+class State(namedtuple("_State", "stage path_artefacts")):
+    def __new__(cls, stage):
+        return super().__new__(cls, stage, {})
+
+
+def builder_inited(app):
     env = BuildEnvironment(app)
+    env.exhibit_state = State(Stage.RstGeneration)
     env.find_files(app.config, DummyBuilder(app))
     # Sphinx's registry API warns on overwrite, but we explicitly rely on
     # overwriting the exhibit directive.
-    rst.directives.register_directive("exhibit", ExhibitAsGenerator)
+    rst.directives.register_directive("exhibit", Exhibit)
     exhibits = []
     for path in map(Path, map(env.doc2path, env.found_docs)):
         contents = path.read_text()
@@ -50,13 +68,20 @@ def gen_exhibits(app):
         else:
             exhibits.extend(
                 (path, match) for match in re.findall(
-                    r"(?m)^\.\.\s+exhibit::\n(?:^(?:[ \t\f\v].*)?\n)+", contents))
+                    r"(?m)^\.\.\s+exhibit::\n(?:^(?:[ \t\f\v].*)?\n)+",
+                    contents))
     # Generation must happen after all the unlinking is done.
     for path, match in exhibits:
-        docutils.core.publish_doctree(match, source_path=path)
-    rst.directives.register_directive("exhibit", ExhibitAsRunner)
+        docutils.core.publish_doctree(
+            match, source_path=path, settings_overrides={"env": env})
+    app.env.exhibit_state = State(Stage.RstGenerated)
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
+
+
+def env_merge_info(env, docnames, other):
+    env.exhibit_stage["path_artefacts"].update(
+        other.exhibit_stage["path_artefacts"])
 
 
 def split_text_and_code_blocks(src):
@@ -84,16 +109,19 @@ def split_text_and_code_blocks(src):
         yield tp, "".join(strs), linenos[0]
 
 
-def generate_rst(src_path, *, sg_style=False):
+def generate_rst(
+        src_path, *, syntax_style=Style.Native, output_style=Style.Native):
 
-    if sg_style:
+    if syntax_style is Style.Native:
+        with tokenize.open(src_path) as file:
+            src = file.read()
+        text_and_code_blocks = split_text_and_code_blocks(src)
+    elif syntax_style is Style.SG:
         from sphinx_gallery.py_source_parser import (
             split_code_and_text_blocks as sg_split_text_and_code_blocks)
         _, text_and_code_blocks = sg_split_text_and_code_blocks(src_path)
     else:
-        with tokenize.open(src_path) as file:
-            src = file.read()
-        text_and_code_blocks = split_text_and_code_blocks(src)
+        assert False
 
     paragraphs = []
     block_counter = itertools.count()
@@ -110,7 +138,7 @@ def generate_rst(src_path, *, sg_style=False):
                               .format(next(block_counter)))
             paragraphs.append(textwrap.indent(string, "   "))
         else:
-            raise AssertionError
+            assert False
 
     return (_deletion_notice
             + ":orphan:\n"
@@ -120,32 +148,35 @@ def generate_rst(src_path, *, sg_style=False):
             + "   :source: {}\n".format(src_path)
             + "   :capture-after-lines: {}\n".format(
                 " ".join(map(str, capture_after_lines)))
+            + "   :output-style: {}\n".format(output_style.value)
             + "\n"
             + "\n\n".join(paragraphs))
 
 
-class SphinxLessDirGetter:
+class SourceGetterMixin(rst.Directive):
     def get_current_source(self):
-        # As long as Sphinx is not set up, we can retrive the current source
-        # from current_source (and settings.env doesn't exist yet).
-        return Path(self.state.document.current_source)
-
-
-class SphinxFullDirGetter:
-    def get_current_source(self):
-        # Once Sphinx is set up, we can retrieve the current source from
-        # settings.env.docname; moreover, current_source becomes sometimes
-        # invalid because Sphinx may insert elements with a source of
-        # <generated>, <rst_prolog>, <rst_epilog>, etc.
         env = self.state.document.settings.env
-        return Path(env.doc2path(env.docname))
+        e_state = env.exhibit_state
+        if e_state.stage is Stage.RstGeneration:
+            # As long as Sphinx is not set up, we can retrive the current
+            # source from current_source (and settings.env doesn't exist yet).
+            return Path(self.state.document.current_source)
+        elif e_state.stage is Stage.RstGenerated:
+            # Once Sphinx is set up, we can retrieve the current source from
+            # settings.env.docname; moreover, current_source becomes sometimes
+            # invalid because Sphinx may insert elements with a source of
+            # <generated>, <rst_prolog>, <rst_epilog>, etc.
+            return Path(env.doc2path(env.docname))
+        else:
+            assert False
 
 
-class ExhibitBase(rst.Directive):
+class Exhibit(SourceGetterMixin):
     option_spec = {
-        "srcdir": rst.directives.unchanged,
-        "destdir": rst.directives.unchanged,
-        "sphinx-gallery": rst.directives.flag,
+        "srcdir": rst.directives.unchanged_required,
+        "destdir": rst.directives.unchanged_required,
+        "syntax-style": Style,
+        "output-style": Style,
     }
     has_content = True
 
@@ -179,40 +210,50 @@ class ExhibitBase(rst.Directive):
                  .with_suffix(".rst"))
                 for src_path in src_paths]
 
-
-class ExhibitAsGenerator(SphinxLessDirGetter, ExhibitBase):
     def run(self):
-        for src_path, dest_path in self.get_src_and_dest_paths():
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            dest_path.write_text(
-                generate_rst(
-                    src_path, sg_style="sphinx-gallery" in self.options))
-            # FIXME: Also arrange to delete this file.
-            shutil.copyfile(src_path, dest_path.parent / src_path.name)
-        return []
+        self.options.setdefault("syntax-style", Style.Native)
+        self.options.setdefault("output-style", Style.Native)
+
+        env = self.state.document.settings.env
+        e_state = env.exhibit_state
+        if e_state.stage is Stage.RstGeneration:
+            for src_path, dest_path in self.get_src_and_dest_paths():
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                dest_path.write_text(generate_rst(
+                    src_path,
+                    syntax_style=self.options["syntax-style"],
+                    output_style=self.options["output-style"]))
+                # FIXME: Also arrange to delete this file.
+                shutil.copyfile(src_path, dest_path.parent / src_path.name)
+            return []
+        elif e_state.stage is Stage.RstGenerated:
+            cur_dir = self.get_current_source().parent
+            vl = ViewList([
+                "* :doc:`{}`".format(
+                    dest_path.relative_to(cur_dir).with_suffix(""))
+                for src_path, dest_path in self.get_src_and_dest_paths()
+            ])
+            node = rst.nodes.Element()
+            self.state.nested_parse(vl, 0, node)
+            return node.children
+        else:
+            assert False
 
 
-class ExhibitAsRunner(SphinxFullDirGetter, ExhibitBase):
-    def run(self):
-        cur_dir = self.get_current_source().parent
-        vl = ViewList([
-            "* :doc:`{}`".format(
-                dest_path.relative_to(cur_dir).with_suffix(""))
-            for src_path, dest_path in self.get_src_and_dest_paths()
-        ])
-        node = rst.nodes.Element()
-        self.state.nested_parse(vl, 0, node)
-        return node.children
-
-
-class ExhibitSource(SphinxFullDirGetter, rst.Directive):
+class ExhibitSource(SourceGetterMixin):
     option_spec = {
-        "source": rst.directives.unchanged,
+        "source": rst.directives.unchanged_required,
         "capture-after-lines": rst.directives.positive_int_list,
+        "output-style": Style,
     }
     has_content = True
 
     def run(self):
+        self.options.setdefault("output-style", Style.Native)
+
+        e_state = self.state.document.settings.env.exhibit_state
+        block_dests = e_state.path_artefacts[self.get_current_source()] = []
+
         with tokenize.open(self.options["source"]) as file:
             mod = ast.parse(file.read())
         body = [(stmt.lineno, stmt) for stmt in mod.body]
@@ -226,13 +267,28 @@ class ExhibitSource(SphinxFullDirGetter, rst.Directive):
                                                     key=lambda kv: kv[0])]
         code = compile(mod, self.options["source"], "exec")
 
-        block_counter = itertools.count()
-
-        def _sphinx_exhibit_export_():
-            block_idx = next(block_counter)
+        def _sphinx_exhibit_export_(
+                *,
+                _block_counter=itertools.count(),
+                _fig_counter=itertools.count()):
+            block_idx = next(_block_counter)
+            block_dests.append([])
             for fig_idx, fignum in enumerate(plt.get_fignums()):
-                plt.figure(fignum).savefig("{}-{}-{}.png".format(
-                    self.get_current_source(), block_idx, fig_idx))
+                if self.options["output-style"] is Style.Native:
+                    dest = Path("{}-{}-{}.png".format(
+                        self.get_current_source(), block_idx, fig_idx))
+                elif self.options["output-style"] is Style.SG:
+                    dir_path = self.get_current_source().parent / "images"
+                    dir_path.mkdir(exist_ok=True)
+                    dest = Path(
+                        dir_path / "sphx_glr_{}_{:03}.png".format(
+                            Path(self.state.document.settings.env.docname).name
+                            .replace("/", "_"),
+                            next(_fig_counter)))
+                else:
+                    assert False
+                block_dests[-1].append(dest)
+                plt.figure(fignum).savefig(dest)
             # FIXME: Make this configurable?
             plt.close("all")
 
@@ -246,27 +302,28 @@ class ExhibitSource(SphinxFullDirGetter, rst.Directive):
         return []
 
 
-class ExhibitBlock(SphinxFullDirGetter, rst.Directive):
+class ExhibitBlock(SourceGetterMixin):
     required_arguments = 1
     has_content = True
 
     def run(self):
-        dest_and_block = Path("{}-{}".format(
-            self.get_current_source(), self.arguments[0]))
-        paths = [path for path in dest_and_block.parent.iterdir()
-                 if re.fullmatch(re.escape(dest_and_block.name) + "-\d*.png",
-                                 path.name)]
-        vl = ViewList([".. code-block:: python", ""]
-                      + ["   " + line for line in self.content]
-                      + [""]
-                      + [".. image:: {}".format(path.name) for path in paths])
+        e_state = self.state.document.settings.env.exhibit_state
+        current_source = self.get_current_source()
+        paths = e_state.path_artefacts[current_source][int(self.arguments[0])]
+        vl = ViewList(
+            [".. code-block:: python", ""]
+            + ["   " + line for line in self.content]
+            + [""]
+            + [".. image:: {}".format(path.relative_to(current_source.parent))
+               for path in paths])
         node = rst.nodes.Element()
         self.state.nested_parse(vl, 0, node)
         return node.children
 
 
 def setup(app):
-    app.connect("builder-inited", gen_exhibits)
+    app.connect("builder-inited", builder_inited)
+    app.connect("env-merge-info", env_merge_info)
     return {"version": __version__,
             "parallel_read_safe": True,
             "parallel_write_safe": True}
