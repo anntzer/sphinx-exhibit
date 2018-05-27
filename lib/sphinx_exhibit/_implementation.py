@@ -31,7 +31,12 @@ from sphinx.environment import BuildEnvironment
 
 from . import _parser, _util, __version__
 
-mpl.backend_bases.FigureManagerBase.show = lambda self: None
+# FIXME: Make these local to exec().
+mpl.backend_bases.FigureCanvasBase.start_event_loop = (
+    lambda self, timeout=0: None)
+mpl.backend_bases.FigureManagerBase.show = (
+    lambda self: None)
+
 plt.switch_backend("agg")
 _log = sphinx.util.logging.getLogger(__name__.split(".")[0])
 _deletion_notice = """\
@@ -48,11 +53,13 @@ class Stage(Enum):
 class Style(Enum):
     Native = "native"
     SG = "sphinx-gallery"
+    None_ = "none"
 
 
 class State(namedtuple("_State", "stage path_artefacts")):
-    def __new__(cls, stage):
-        return super().__new__(cls, stage, {})
+    # Second argument is needed for (un)picklability.
+    def __new__(cls, stage, path_artefacts=None):
+        return super().__new__(cls, stage, path_artefacts or {})
 
 
 def builder_inited(app):
@@ -69,7 +76,10 @@ def builder_inited(app):
     rst.directives.register_directive("exhibit", Exhibit)
     for docname in env.found_docs:
         path = Path(env.doc2path(docname))
-        contents = path.read_text()
+        try:
+            contents = path.read_text()
+        except FileNotFoundError:  # Could have been deleted just above.
+            continue
         if re.search(r"\.\.\s+exhibit::\n", contents):
             env.prepare_settings(docname)
             docutils.core.publish_doctree(
@@ -79,9 +89,8 @@ def builder_inited(app):
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
 
 
-def env_merge_info(env, docnames, other):
-    env.exhibit_stage["path_artefacts"].update(
-        other.exhibit_stage["path_artefacts"])
+def env_merge_info(app, env, docnames, other):
+    env.exhibit_state.path_artefacts.update(other.exhibit_state.path_artefacts)
 
 
 def split_text_and_code_blocks(src):
@@ -187,9 +196,6 @@ class Exhibit(SourceGetterMixin):
         for line in self.content:
             if line.startswith("!"):
                 excluded = sorted(src_dir.glob(line[1:]))
-                _log.info("expanding (for removal) %s to %s.",
-                          line, " ".join(str(path.relative_to(src_dir))
-                                         for path in excluded))
                 for path in excluded:
                     try:
                         src_paths.remove(path)
@@ -199,9 +205,6 @@ class Exhibit(SourceGetterMixin):
                 if line.startswith(r"\!"):
                     line = line[1:]
                 added = sorted(src_dir.glob(line))
-                _log.info("expanding (for addition) %s to %s.",
-                          line, " ".join(str(path.relative_to(src_dir))
-                                         for path in added))
                 src_paths.extend(added)
         dest_dir = cur_dir / self.options["destdir"]
         return [(src_path,
@@ -219,10 +222,12 @@ class Exhibit(SourceGetterMixin):
         if e_state.stage is Stage.RstGeneration:
             for src_path, dest_path in self.get_src_and_dest_paths():
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
-                dest_path.write_text(generate_rst(
-                    src_path,
-                    syntax_style=self.options["syntax-style"],
-                    output_style=self.options["output-style"]))
+                _util.ensure_contents(
+                    dest_path,
+                    generate_rst(
+                        src_path,
+                        syntax_style=self.options["syntax-style"],
+                        output_style=self.options["output-style"]))
                 # FIXME: Also arrange to delete this file.
                 shutil.copyfile(src_path, dest_path.parent / src_path.name)
             return []
@@ -250,16 +255,22 @@ class ExhibitSource(SourceGetterMixin):
 
     def run(self):
         self.options.setdefault("output-style", Style.Native)
+        self.options["capture-after-lines"] = (  # Not None.
+            self.options["capture-after-lines"] or [])
 
         e_state = self.state.document.settings.env.exhibit_state
-        block_dests = e_state.path_artefacts[self.get_current_source()] = []
+        block_dests = e_state.path_artefacts[self.get_current_source()] = [
+            [] for _ in self.options["capture-after-lines"]]
+
+        if self.options["output-style"] is Style.None_:
+            return []
 
         with tokenize.open(self.options["source"]) as file:
             mod = ast.parse(file.read())
         body = [(stmt.lineno, stmt) for stmt in mod.body]
         inserted = ast.parse("_sphinx_exhibit_export_()").body[0]
         insertions = []
-        for lineno in self.options["capture-after-lines"] or []:  # Not None.
+        for lineno in self.options["capture-after-lines"]:
             stmt = copy.deepcopy(inserted)
             ast.increment_lineno(stmt, lineno - 1)
             insertions.append((lineno + .5, stmt))
@@ -267,12 +278,12 @@ class ExhibitSource(SourceGetterMixin):
                                                     key=lambda kv: kv[0])]
         code = compile(mod, self.options["source"], "exec")
 
+        sg_base_num = 0
+
         def _sphinx_exhibit_export_(
-                *,
-                _block_counter=itertools.count(),
-                _fig_counter=itertools.count()):
+                *, _block_counter=itertools.count()):
+            nonlocal sg_base_num
             block_idx = next(_block_counter)
-            block_dests.append([])
             for fig_idx, fignum in enumerate(plt.get_fignums()):
                 if self.options["output-style"] is Style.Native:
                     dest = Path("{}-{}-{}.png".format(
@@ -284,21 +295,29 @@ class ExhibitSource(SourceGetterMixin):
                         dir_path / "sphx_glr_{}_{:03}.png".format(
                             Path(self.state.document.settings.env.docname).name
                             .replace("/", "_"),
-                            next(_fig_counter)))
+                            sg_base_num + fignum))
                 else:
                     assert False
-                block_dests[-1].append(dest)
+                block_dests[block_idx].append(dest)
                 plt.figure(fignum).savefig(dest)
+            sg_base_num += len(plt.get_fignums())
             # FIXME: Make this configurable?
             plt.close("all")
 
         # FIXME: chdir is only for SG compatibility.
+        # FIXME: Also patch sys.argv.
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
-        with _util.chdir_cm(Path(self.options["source"]).parent), \
-                warnings.catch_warnings():
-            mpl.testing.decorators.cleanup("default")(lambda: exec(
-                code, {"_sphinx_exhibit_export_": _sphinx_exhibit_export_}))()
+        try:
+            with _util.chdir_cm(Path(self.options["source"]).parent), \
+                    warnings.catch_warnings():
+                mpl.testing.decorators.cleanup("default")(lambda: exec(
+                    code,
+                    {"_sphinx_exhibit_export_": _sphinx_exhibit_export_,
+                     "__file__": self.options["source"]}))()
+        # FIXME: Report error.
+        except (Exception, SystemExit):
+            pass
         return []
 
 
