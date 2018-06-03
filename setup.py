@@ -23,6 +23,8 @@ setup(
         "write_to": "lib/sphinx_exhibit/_version.py",
     },
     install_requires=[
+        "matplotlib",
+        "sphinx",
     ],
     entry_points={
         "console_scripts": [],
