@@ -17,6 +17,7 @@ from pathlib import Path
 import shutil
 import textwrap
 import tokenize
+from types import SimpleNamespace
 import warnings
 
 import docutils
@@ -29,7 +30,7 @@ import sphinx
 from sphinx.builders.dummy import DummyBuilder
 from sphinx.environment import BuildEnvironment
 
-from . import _parser, _util, __version__
+from . import _lib2to3_parser, _offset_annotator, _util, __version__
 
 # FIXME: Make these local to exec().
 mpl.backend_bases.FigureCanvasBase.start_event_loop = (
@@ -97,7 +98,7 @@ def env_merge_info(app, env, docnames, other):
 
 
 def split_text_and_code_blocks(src):
-    tree = _parser.parse(src)
+    tree = _lib2to3_parser.parse(src)
 
     def _inner():
         for i, node in enumerate(tree.children):
@@ -264,21 +265,63 @@ class ExhibitSource(SourceGetterMixin):
         if self.options["output-style"] is Style.None_:
             return []
 
-        with tokenize.open(self.options["source"]) as file:
-            mod = ast.parse(file.read())
-        body = [(stmt.lineno, stmt) for stmt in mod.body]
-        inserted = ast.parse("_sphinx_exhibit_export_()").body[0]
-        insertions = []
+        mod = _offset_annotator.parse(self.options["source"])
+
+        # Rewrite:
+        # - foo (Load context only)
+        #   -> _sphinx_exhibit_name_(foo, offset)
+        # - foo.bar (any context)
+        #   -> _sphinx_exhibit_attr_(foo, "bar", offset).bar
+        #   (this one needs to be valid in a store context).
+
+        class Transformer(ast.NodeTransformer):
+            def visit_Name(self, node):
+                return (
+                    ast.fix_missing_locations(ast.copy_location(
+                        ast.Call(
+                            ast.Name("_sphinx_exhibit_name_", ast.Load()),
+                            [node, ast.Num(node.offset)],
+                            []),
+                        node))
+                    if type(node.ctx) == ast.Load else
+                    node)
+
+            def visit_Attribute(self, node):
+                self.generic_visit(node)
+                node.value = ast.fix_missing_locations(ast.copy_location(
+                    ast.Call(
+                        ast.Name("_sphinx_exhibit_attr_", ast.Load()),
+                        [node.value, ast.Str(node.attr), ast.Num(node.offset)],
+                        []),
+                    node))
+                return node
+
+        mod = Transformer().visit(mod)
+
         for lineno in self.options["capture-after-lines"]:
-            stmt = copy.deepcopy(inserted)
-            ast.increment_lineno(stmt, lineno - 1)
-            insertions.append((lineno + .5, stmt))
-        mod.body = [stmt for lineno, stmt in sorted(body + insertions,
-                                                    key=lambda kv: kv[0])]
+            inserted = ast.fix_missing_locations(
+                ast.Expr(
+                    ast.Call(
+                        ast.Name("_sphinx_exhibit_export_", ast.Load()),
+                        [], []),
+                    lineno=lineno))
+            mod.body.append(inserted)
+        mod.body.sort(key=lambda stmt: stmt.lineno)
         code = compile(mod, self.options["source"], "exec")
 
-        sg_base_num = 0
+        annotations = {}
 
+        def _sphinx_exhibit_name_(obj, offset):
+            annotations.setdefault(offset, []).append(obj)
+            return obj
+
+        def _sphinx_exhibit_attr_(obj, attr, offset):
+            attr_val = getattr(obj, attr)
+            annotations.setdefault(offset, []).append(attr_val)
+            # Return a proxy object, to avoid triggering descriptors twice.
+            return SimpleNamespace(**{attr: attr_val})
+
+        sg_base_num = 0
         def _sphinx_exhibit_export_(
                 *, _block_counter=itertools.count()):
             nonlocal sg_base_num
@@ -308,17 +351,24 @@ class ExhibitSource(SourceGetterMixin):
         # FIXME: runpy + override source_to_code in a custom importer.
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
-        try:
-            with _util.chdir_cm(Path(self.options["source"]).parent), \
-                    warnings.catch_warnings():
+        with _util.chdir_cm(Path(self.options["source"]).parent), \
+                warnings.catch_warnings():
+            try:
                 mpl.testing.decorators.cleanup("default")(lambda: exec(
                     code,
-                    {"_sphinx_exhibit_export_": _sphinx_exhibit_export_,
+                    {"_sphinx_exhibit_name_": _sphinx_exhibit_name_,
+                     "_sphinx_exhibit_attr_": _sphinx_exhibit_attr_,
+                     "_sphinx_exhibit_export_": _sphinx_exhibit_export_,
                      "__file__": self.options["source"],
                      "__name__": "__main__"}))()
-        # FIXME: Report error.
-        except (Exception, SystemExit):
-            pass
+            # FIXME: Report error.
+            except (Exception, SystemExit):
+                raise
+                pass
+
+        import pprint
+        pprint.pprint(annotations)
+
         return []
 
 

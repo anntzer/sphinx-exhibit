@@ -3,7 +3,7 @@ from lib2to3.pgen2.driver import Driver
 from lib2to3.pytree import Node, Leaf
 
 
-def parse(code):
+def parse(source):
     """String -> AST
 
     Parse the string and return its AST representation. May raise
@@ -12,7 +12,7 @@ def parse(code):
     # Modified from
     # https://gist.github.com/FZambia/876b724c329e864b6642adc52b577cdb
     drv = Driver(pygram.python_grammar, pytree.convert)
-    result = drv.parse_string(code + "\n", True)
+    result = drv.parse_string(source + "\n", True)
     if isinstance(result, Leaf):  # Always return a Node, not a Leaf.
         result = Node(pygram.python_symbols.file_input, [result])
     # Could track whether str() needs to remove the newline, but not worth it.
