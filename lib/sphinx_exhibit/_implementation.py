@@ -17,7 +17,7 @@ from pathlib import Path
 import shutil
 import textwrap
 import tokenize
-from types import SimpleNamespace
+from types import FunctionType, MethodType, ModuleType, SimpleNamespace
 import warnings
 
 import docutils
@@ -57,10 +57,13 @@ class Style(Enum):
     None_ = "none"
 
 
-class State(namedtuple("_State", "stage path_artefacts")):
+class State(namedtuple("_State", "stage paths")):
     # Second argument is needed for (un)picklability.
-    def __new__(cls, stage, path_artefacts=None):
-        return super().__new__(cls, stage, path_artefacts or {})
+    def __new__(cls, stage, paths=None):
+        return super().__new__(cls, stage, paths or {})
+
+
+PathInfo = namedtuple("PathInfo", "artefacts annotations")
 
 
 def builder_inited(app):
@@ -94,7 +97,7 @@ def builder_inited(app):
 
 
 def env_merge_info(app, env, docnames, other):
-    env.exhibit_state.path_artefacts.update(other.exhibit_state.path_artefacts)
+    env.exhibit_state.paths.update(other.exhibit_state.paths)
 
 
 def split_text_and_code_blocks(src):
@@ -246,6 +249,19 @@ class Exhibit(SourceGetterMixin):
             assert False
 
 
+def _get_doc_name(obj, source_name):
+    if (not hasattr(obj, "__module__")
+            or getattr(obj, "__name__", object()) != source_name):
+        return None
+    elif isinstance(obj, ModuleType):
+        return (obj.__module__, obj.__name__)
+    elif isinstance(obj, (FunctionType, MethodType)):
+        return (obj.__module__, obj.__qualname__)
+    else:
+        raise TypeError(
+            "Named module-level object of unknown type: {!r}".format(obj))
+
+
 class ExhibitSource(SourceGetterMixin):
     option_spec = {
         "source": rst.directives.unchanged_required,
@@ -259,8 +275,10 @@ class ExhibitSource(SourceGetterMixin):
         self.options.setdefault("output-style", Style.Native)
 
         e_state = self.state.document.settings.env.exhibit_state
-        block_dests = e_state.path_artefacts[self.get_current_source()] = [
-            [] for _ in self.options["capture-after-lines"]]
+        block_dests = [[] for _ in self.options["capture-after-lines"]]
+        annotations = {}
+        e_state.paths[self.get_current_source()] = PathInfo(
+            artefacts=block_dests, annotations=annotations)
 
         if self.options["output-style"] is Style.None_:
             return []
@@ -269,7 +287,7 @@ class ExhibitSource(SourceGetterMixin):
 
         # Rewrite:
         # - foo (Load context only)
-        #   -> _sphinx_exhibit_name_(foo, offset)
+        #   -> _sphinx_exhibit_name_(foo, "foo", offset)
         # - foo.bar (any context)
         #   -> _sphinx_exhibit_attr_(foo, "bar", offset).bar
         #   (this one needs to be valid in a store context).
@@ -280,7 +298,7 @@ class ExhibitSource(SourceGetterMixin):
                     ast.fix_missing_locations(ast.copy_location(
                         ast.Call(
                             ast.Name("_sphinx_exhibit_name_", ast.Load()),
-                            [node, ast.Num(node.offset)],
+                            [node, ast.Str(node.id), ast.Num(node.offset)],
                             []),
                         node))
                     if type(node.ctx) == ast.Load else
@@ -309,17 +327,19 @@ class ExhibitSource(SourceGetterMixin):
         mod.body.sort(key=lambda stmt: stmt.lineno)
         code = compile(mod, self.options["source"], "exec")
 
-        annotations = {}
-
-        def _sphinx_exhibit_name_(obj, offset):
-            annotations.setdefault(offset, []).append(obj)
+        def _sphinx_exhibit_name_(obj, name, offset):
+            obj_name = _get_doc_name(obj, name)
+            if obj_name:
+                annotations.setdefault(offset, []).append(obj_name)
             return obj
 
-        def _sphinx_exhibit_attr_(obj, attr, offset):
-            attr_val = getattr(obj, attr)
-            annotations.setdefault(offset, []).append(attr_val)
+        def _sphinx_exhibit_attr_(obj, name, offset):
+            attr = getattr(obj, name)
+            obj_name = _get_doc_name(attr, name)
+            if obj_name:
+                annotations.setdefault(offset, []).append(obj_name)
             # Return a proxy object, to avoid triggering descriptors twice.
-            return SimpleNamespace(**{attr: attr_val})
+            return SimpleNamespace(**{name: attr})
 
         sg_base_num = 0
         def _sphinx_exhibit_export_(
@@ -366,8 +386,7 @@ class ExhibitSource(SourceGetterMixin):
                 raise
                 pass
 
-        import pprint
-        pprint.pprint(annotations)
+        import pprint; pprint.pprint(annotations)
 
         return []
 
@@ -379,7 +398,7 @@ class ExhibitBlock(SourceGetterMixin):
     def run(self):
         e_state = self.state.document.settings.env.exhibit_state
         current_source = self.get_current_source()
-        paths = e_state.path_artefacts[current_source][int(self.arguments[0])]
+        paths = e_state.paths[current_source].artefacts[int(self.arguments[0])]
         vl = ViewList(
             [".. code-block:: python", ""]
             + ["   " + line for line in self.content]
