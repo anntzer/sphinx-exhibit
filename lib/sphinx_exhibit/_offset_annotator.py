@@ -12,17 +12,21 @@ def iter_attribute_tokens(fname):
                 yield next(tokens)
 
 
-def parse(fname):
+def parse(fname, code_line_idxs):
     attr_tokens = iter_attribute_tokens(fname)
 
     with tokenize.open(fname) as file:
         source = file.read()
 
-    line_start_idxs = [
-        0, *itertools.accumulate(map(len, source.splitlines(keepends=True)))]
+    lines = source.splitlines(keepends=True)
+    skipped_line_idxs = {*range(1, len(lines) + 1)}.difference(code_line_idxs)
+    for idx in skipped_line_idxs:
+        lines[idx - 1] = ""
+    line_start_offsets = [
+        0, *itertools.accumulate(len(line) for line in lines)]
 
     def to_offset(lineno, col_offset):
-        return line_start_idxs[lineno - 1] + col_offset
+        return line_start_offsets[lineno - 1] + col_offset
 
     class OffsetAnnotator(ast.NodeVisitor):
         def visit_Name(self, node):
@@ -32,6 +36,7 @@ def parse(fname):
         def visit_Attribute(self, node):
             self.generic_visit(node)
             token = next(attr_tokens)
+            assert node.attr == token.string
             node.offset = to_offset(*token.start)
 
     mod = ast.parse(source)

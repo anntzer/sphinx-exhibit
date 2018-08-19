@@ -23,6 +23,7 @@ setup(
         "write_to": "lib/sphinx_exhibit/_version.py",
     },
     install_requires=[
+        "lxml",
         "matplotlib",
         "sphinx",
     ],

@@ -23,6 +23,7 @@ import warnings
 import docutils
 from docutils.parsers import rst
 from docutils.statemachine import ViewList
+import lxml.html
 import matplotlib as mpl
 import matplotlib.testing.decorators
 from matplotlib import pyplot as plt
@@ -57,18 +58,19 @@ class Style(Enum):
     None_ = "none"
 
 
-class State(namedtuple("_State", "stage paths")):
-    # Second argument is needed for (un)picklability.
-    def __new__(cls, stage, paths=None):
-        return super().__new__(cls, stage, paths or {})
+State = namedtuple("State", "stage docnames")
 
 
-PathInfo = namedtuple("PathInfo", "artefacts annotations")
+class PathInfo:
+    def __init__(self):
+        self.code_line_idxs = None
+        self.artefacts = None
+        self.annotations = None
 
 
 def builder_inited(app):
     env = BuildEnvironment(app)
-    env.exhibit_state = State(Stage.RstGeneration)
+    env.exhibit_state = State(Stage.RstGeneration, {})
     env.find_files(app.config, DummyBuilder(app))
     exhibits = []
     for docname in env.found_docs:
@@ -91,13 +93,10 @@ def builder_inited(app):
             env.prepare_settings(docname)
             docutils.core.publish_doctree(
                 contents, source_path=path, settings_overrides={"env": env})
-    app.env.exhibit_state = State(Stage.RstGenerated)
+    app.env.exhibit_state = State(
+        Stage.RstGenerated, env.exhibit_state.docnames)
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
-
-
-def env_merge_info(app, env, docnames, other):
-    env.exhibit_state.paths.update(other.exhibit_state.paths)
 
 
 def split_text_and_code_blocks(src):
@@ -118,62 +117,90 @@ def split_text_and_code_blocks(src):
                            "".join(leaf.value for leaf in node.leaves())),
                        node.get_lineno())
             else:
-                yield ("code", str(node), node.get_lineno())
+                yield ("code", node, node.get_lineno())
 
     for tp, it_group in itertools.groupby(_inner(), lambda kv: kv[0]):
-        _, strs, linenos = zip(*it_group)
-        yield tp, "".join(strs), linenos[0]
+        _, strs_or_nodes, linenos = zip(*it_group)
+        if tp == "text":
+            string = "".join(strs_or_nodes)
+        elif tp == "code":
+            nodes = [*strs_or_nodes]
+            # Extra newlines at the beginning or the end would be dropped
+            # during the rst parsing, so drop them.  Also, extra newlines at
+            # the beginning would invalidate node.get_lineno().
+            nodes[0].prefix = ""
+            string = "".join(map(str, nodes)).rstrip("\n") + "\n"
+        yield tp, string, linenos[0]
 
 
-def generate_rst(
+def process_py_source(
         src_path, *, syntax_style=Style.Native, output_style=Style.Native):
 
+    with src_path.open("rb") as file:
+        encoding, _ = tokenize.detect_encoding(file.readline)
     if syntax_style is Style.Native:
-        with tokenize.open(src_path) as file:
+        with src_path.open(encoding=encoding) as file:
             src = file.read()
         text_and_code_blocks = split_text_and_code_blocks(src)
     elif syntax_style is Style.SG:
         from sphinx_gallery.py_source_parser import (
             split_code_and_text_blocks as sg_split_text_and_code_blocks)
         _, text_and_code_blocks = sg_split_text_and_code_blocks(src_path)
+        # Strip extra newlines at the beginning and the end, as above.  Note
+        # that s-g provides a correct lineno including the beginning newlines,
+        # so it must be fixed.
+        for i in range(len(text_and_code_blocks)):
+            tp, string, lineno = text_and_code_blocks[i]
+            if tp == "code":
+                text_and_code_blocks[i] = (
+                    tp,
+                    string.strip("\n") + "\n",
+                    lineno + len(string) - len(string.lstrip("\n")))
     else:
         assert False
 
-    paragraphs = []
-    block_counter = itertools.count()
+    text_blocks = []
+    code_line_idxs = []
     capture_after_lines = []
+    block_counter = itertools.count()
     for tp, string, lineno in text_and_code_blocks:
         if tp == "text":
-            paragraphs.append(string)
+            text_blocks.append(string)
         elif tp == "code":
             if not string.strip():
                 # Don't generate a code-block if the file ends with text.
                 continue
-            capture_after_lines.append(lineno + string.count("\n") - 1)
-            paragraphs.append(".. exhibit-block:: {}"
-                              .format(next(block_counter)))
-            paragraphs.append(textwrap.indent(string, "   "))
+            n_lines = string.count("\n")
+            code_line_idxs.extend(range(lineno, lineno + n_lines))
+            capture_after_lines.append(code_line_idxs[-1])
+            text_blocks.append(".. exhibit-block:: {}"
+                               .format(next(block_counter)))
+            text_blocks.append(textwrap.indent(string, "   "))
         else:
             assert False
 
-    return (_deletion_notice
-            + ":orphan:\n"
-            + "\n"
-            + ".. exhibit-source::\n"
-            # FIXME: Relative path here?
-            + "   :source: {}\n".format(src_path)
-            + "   :capture-after-lines: {}\n".format(
-                " ".join(map(str, capture_after_lines)))
-            + "   :output-style: {}\n".format(output_style.value)
-            + "\n"
-            + "\n\n".join(paragraphs))
+    rst_source = (_deletion_notice
+                  + ":orphan:\n"
+                  + "\n"
+                  + ".. exhibit-source::\n"
+                  # FIXME: Relative path here?
+                  + "   :source: {}\n".format(src_path)
+                  + "   :capture-after-lines: {}\n".format(
+                      " ".join(map(str, capture_after_lines)))
+                  + "   :output-style: {}\n".format(output_style.value)
+                  + "\n"
+                  + "\n\n".join(text_blocks))
+
+    return rst_source, code_line_idxs
 
 
 class SourceGetterMixin(rst.Directive):
+    def get_current_docname(self):
+        return self.state.document.settings.env.docname
+
     def get_current_source(self):
-        env = self.state.document.settings.env
-        e_state = env.exhibit_state
-        return Path(env.doc2path(env.docname))
+        return Path(self.state.document.settings.env.doc2path(
+            self.get_current_docname()))
 
 
 class Exhibit(SourceGetterMixin):
@@ -185,7 +212,7 @@ class Exhibit(SourceGetterMixin):
     }
     has_content = True
 
-    def get_src_and_dest_paths(self):
+    def get_src_paths_and_docnames(self):
         cur_dir = self.get_current_source().parent
         src_dir = cur_dir / self.options["srcdir"]
         src_paths = []
@@ -210,11 +237,9 @@ class Exhibit(SourceGetterMixin):
                           " ".join(str(path.relative_to(src_dir))
                                    for path in added))
                 src_paths.extend(added)
-        dest_dir = cur_dir / self.options["destdir"]
         return [(src_path,
-                 (dest_dir / src_path.relative_to(src_dir))
-                 # FIXME: Respect suffixes.
-                 .with_suffix(".rst"))
+                 Path(self.options["destdir"], src_path.relative_to(src_dir))
+                 .with_suffix("").as_posix())
                 for src_path in src_paths]
 
     def run(self):
@@ -224,24 +249,24 @@ class Exhibit(SourceGetterMixin):
         env = self.state.document.settings.env
         e_state = env.exhibit_state
         if e_state.stage is Stage.RstGeneration:
-            for src_path, dest_path in self.get_src_and_dest_paths():
+            for src_path, docname in self.get_src_paths_and_docnames():
+                dest_path = Path(env.doc2path(docname))
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
-                _util.ensure_contents(
-                    dest_path,
-                    generate_rst(
-                        src_path,
-                        syntax_style=self.options["syntax-style"],
-                        output_style=self.options["output-style"]))
+                rst_source, code_line_idxs = process_py_source(
+                    src_path,
+                    syntax_style=self.options["syntax-style"],
+                    output_style=self.options["output-style"])
+                _util.ensure_contents(dest_path, rst_source)
                 # FIXME: Also arrange to delete this file.
                 shutil.copyfile(src_path, dest_path.parent / src_path.name)
+                e_state.docnames[docname] = path_info = PathInfo()
+                path_info.code_line_idxs = code_line_idxs
             return []
         elif e_state.stage is Stage.RstGenerated:
             cur_dir = self.get_current_source().parent
             vl = ViewList([
-                "* :doc:`{}`".format(
-                    dest_path.relative_to(cur_dir).with_suffix(""))
-                for src_path, dest_path in self.get_src_and_dest_paths()
-            ])
+                "* :doc:`{}`".format(docname)
+                for src_path, docname in self.get_src_paths_and_docnames()])
             node = rst.nodes.Element()
             self.state.nested_parse(vl, 0, node)
             return node.children
@@ -249,7 +274,7 @@ class Exhibit(SourceGetterMixin):
             assert False
 
 
-def _get_doc_name(obj, source_name):
+def get_doc_ref(obj, source_name):
     if (not hasattr(obj, "__module__")
             or getattr(obj, "__name__", object()) != source_name):
         return None
@@ -275,15 +300,15 @@ class ExhibitSource(SourceGetterMixin):
         self.options.setdefault("output-style", Style.Native)
 
         e_state = self.state.document.settings.env.exhibit_state
-        block_dests = [[] for _ in self.options["capture-after-lines"]]
-        annotations = {}
-        e_state.paths[self.get_current_source()] = PathInfo(
-            artefacts=block_dests, annotations=annotations)
+        path_info = e_state.docnames[self.get_current_docname()]
+        path_info.artefacts = [[] for _ in self.options["capture-after-lines"]]
+        path_info.annotations = {}
 
         if self.options["output-style"] is Style.None_:
             return []
 
-        mod = _offset_annotator.parse(self.options["source"])
+        mod = _offset_annotator.parse(
+            self.options["source"], path_info.code_line_idxs)
 
         # Rewrite:
         # - foo (Load context only)
@@ -328,16 +353,16 @@ class ExhibitSource(SourceGetterMixin):
         code = compile(mod, self.options["source"], "exec")
 
         def _sphinx_exhibit_name_(obj, name, offset):
-            obj_name = _get_doc_name(obj, name)
-            if obj_name:
-                annotations.setdefault(offset, []).append(obj_name)
+            doc_ref = get_doc_ref(obj, name)
+            if doc_ref:
+                path_info.annotations.setdefault(offset, []).append(doc_ref)
             return obj
 
         def _sphinx_exhibit_attr_(obj, name, offset):
             attr = getattr(obj, name)
-            obj_name = _get_doc_name(attr, name)
-            if obj_name:
-                annotations.setdefault(offset, []).append(obj_name)
+            doc_ref = get_doc_ref(attr, name)
+            if doc_ref:
+                path_info.annotations.setdefault(offset, []).append(doc_ref)
             # Return a proxy object, to avoid triggering descriptors twice.
             return SimpleNamespace(**{name: attr})
 
@@ -360,13 +385,13 @@ class ExhibitSource(SourceGetterMixin):
                             sg_base_num + fignum))
                 else:
                     assert False
-                block_dests[block_idx].append(dest)
+                path_info.artefacts[block_idx].append(dest)
                 plt.figure(fignum).savefig(dest)
             sg_base_num += len(plt.get_fignums())
             # FIXME: Make this configurable?
             plt.close("all")
 
-        # FIXME: chdir is only for SG compatibility.
+        # FIXME: chdir is only for s-g compatibility.
         # FIXME: Also patch sys.argv.
         # FIXME: runpy + override source_to_code in a custom importer.
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
@@ -386,8 +411,6 @@ class ExhibitSource(SourceGetterMixin):
                 raise
                 pass
 
-        import pprint; pprint.pprint(annotations)
-
         return []
 
 
@@ -398,7 +421,8 @@ class ExhibitBlock(SourceGetterMixin):
     def run(self):
         e_state = self.state.document.settings.env.exhibit_state
         current_source = self.get_current_source()
-        paths = e_state.paths[current_source].artefacts[int(self.arguments[0])]
+        paths = (e_state.docnames[self.get_current_docname()]
+                 .artefacts[int(self.arguments[0])])
         vl = ViewList(
             [".. code-block:: python", ""]
             + ["   " + line for line in self.content]
@@ -410,9 +434,46 @@ class ExhibitBlock(SourceGetterMixin):
         return node.children
 
 
+# FIXME
+def env_merge_info(app, env, docnames, other):
+    env.exhibit_state.paths.update(other.exhibit_state.paths)
+
+
+def build_finished(app, exc):
+    if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
+        return
+    for docname in app.env.exhibit_state.docnames:
+        embed_annotations(Path(app.outdir, docname).with_suffix(".html"),
+                          app.env.exhibit_state.docnames[docname].annotations)
+
+
+def embed_annotations(html_path, annotations):
+    tree = lxml.html.parse(str(html_path))
+    root = tree.getroot()
+    elems = root.findall(
+        ".//div[@class='highlight-python notranslate']/div/pre")
+    offset = 0
+    offset_to_elem = {}
+
+    def visit(elem, _depth=0):
+        nonlocal offset
+        offset_to_elem[offset] = elem
+        offset += len(elem.text or "")
+        for child in elem:
+            visit(child, _depth+1)
+        offset += len(elem.tail or "")
+
+    for elem in elems:
+        visit(elem)
+
+    for offset, doc_ref in annotations.items():
+        print(offset, doc_ref, offset_to_elem[offset].text)
+
+
 def setup(app):
     app.connect("builder-inited", builder_inited)
     app.connect("env-merge-info", env_merge_info)
+    app.connect("build-finished", build_finished)
     return {"version": __version__,
             "env_version": 0,
             "parallel_read_safe": True,
