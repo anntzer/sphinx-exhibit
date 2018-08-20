@@ -63,6 +63,7 @@ State = namedtuple("State", "stage docnames")
 
 class PathInfo:
     def __init__(self):
+        # NOTE: if adding fields, update merging procedure in env_merge_info.
         self.code_line_idxs = None
         self.artefacts = None
         self.annotations = None
@@ -452,9 +453,14 @@ class ExhibitBlock(SourceGetterMixin):
         return node.children
 
 
-# FIXME
 def env_merge_info(app, env, docnames, other):
-    env.exhibit_state.paths.update(other.exhibit_state.paths)
+    for path, other_info in other.exhibit_state.paths.items():
+        this_info = env.state.exhibit_state.paths[path]
+        if (this_info.artefacts and other_info.artefacts
+                or this_info.annotations and other_info.annotations):
+            raise RuntimeError
+        this_info.artefacts = this_info.artefacts or other_info.artefacts
+        this_info.annotations = this_info.annotations or other_info.annotations
 
 
 def build_finished(app, exc):
