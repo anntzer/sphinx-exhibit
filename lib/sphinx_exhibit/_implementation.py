@@ -7,7 +7,7 @@
 # FIXME: Upstream fix to sphinx-jinja.
 
 import ast
-from collections import namedtuple
+from collections import ChainMap, namedtuple
 import copy
 from enum import Enum
 import itertools
@@ -274,14 +274,31 @@ class Exhibit(SourceGetterMixin):
             assert False
 
 
+# FIXME: classmethod, staticmethod.
 def get_doc_ref(obj, source_name):
-    if (not hasattr(obj, "__module__")
-            or getattr(obj, "__name__", object()) != source_name):
+    if getattr(obj, "__name__", object()) != source_name:
         return None
     elif isinstance(obj, ModuleType):
-        return (obj.__module__, obj.__name__)
-    elif isinstance(obj, (FunctionType, MethodType)):
-        return (obj.__module__, obj.__qualname__)
+        return SimpleNamespace(
+            role="py:module",
+            name=obj.__name__,
+            lookups=[obj.__name__])
+    elif not hasattr(obj, "__module__"):
+        return None
+    elif isinstance(obj, FunctionType) and "." not in obj.__qualname__:
+        return SimpleNamespace(
+            role="py:function",
+            module=obj.__module__,
+            qualname=obj.__qualname__,
+            lookups=[obj.__module__ + "." + obj.__qualname__,
+                     obj.__qualname__])
+    elif isinstance(obj, MethodType):
+        return SimpleNamespace(
+            role="py:method",
+            module=obj.__module__,
+            qualname=obj.__qualname__,
+            lookups=[obj.__module__ + "." + obj.__qualname__,
+                     obj.__qualname__])
     else:
         raise TypeError(
             "Named module-level object of unknown type: {!r}".format(obj))
@@ -361,6 +378,7 @@ class ExhibitSource(SourceGetterMixin):
         def _sphinx_exhibit_attr_(obj, name, offset):
             attr = getattr(obj, name)
             doc_ref = get_doc_ref(attr, name)
+            # FIXME: Also fetch py:attribute.
             if doc_ref:
                 path_info.annotations.setdefault(offset, []).append(doc_ref)
             # Return a proxy object, to avoid triggering descriptors twice.
@@ -442,12 +460,36 @@ def env_merge_info(app, env, docnames, other):
 def build_finished(app, exc):
     if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
         return
+    inv = {}
+    for role, role_inv in app.env.intersphinx_inventory.items():
+        suffixes_role_inv = {}
+        for k, v in role_inv.items():
+            parts = k.split(".")
+            for i in range(len(parts)):
+                suffixes_role_inv.setdefault(".".join(parts[i:]), []).append(v)
+        inv[role] = ChainMap(
+            role_inv,
+            # Only keep unambiguous suffixes.
+            {suffix: vs[0] for suffix, vs in suffixes_role_inv.items()
+             if len(vs) == 1})
     for docname in app.env.exhibit_state.docnames:
-        embed_annotations(Path(app.outdir, docname).with_suffix(".html"),
+        embed_annotations(inv, Path(app.outdir, docname).with_suffix(".html"),
                           app.env.exhibit_state.docnames[docname].annotations)
 
 
-def embed_annotations(html_path, annotations):
+# FIXME: Also lookup the local inventory.
+# FIXME: Skip if intersphinx is inactive.
+def lookup_href(inv, doc_ref):
+    role_inv = inv[doc_ref.role]
+    entry = next(filter(None,
+                        (role_inv.get(lookup) for lookup in doc_ref.lookups)),
+                 None)
+    if entry:
+        projname, version, location, dispname = entry
+        return location
+
+
+def embed_annotations(inv, html_path, annotations):
     tree = lxml.html.parse(str(html_path))
     root = tree.getroot()
     elems = root.findall(
@@ -466,8 +508,20 @@ def embed_annotations(html_path, annotations):
     for elem in elems:
         visit(elem)
 
-    for offset, doc_ref in annotations.items():
-        print(offset, doc_ref, offset_to_elem[offset].text)
+    for offset, doc_refs in annotations.items():
+        if len(doc_refs) == 1:
+            elem = offset_to_elem[offset]
+            doc_ref, = doc_refs
+            href = lookup_href(inv, doc_ref)
+            if not href:
+                continue
+            assert elem.text == doc_ref.lookups[0].split(".")[-1]
+            link = lxml.html.Element("a", href=href)
+            link.text = elem.text
+            elem.text = ""
+            elem.append(link)
+
+    tree.write(str(html_path))
 
 
 def setup(app):
