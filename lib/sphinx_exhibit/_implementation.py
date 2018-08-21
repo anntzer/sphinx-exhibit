@@ -1,7 +1,7 @@
 # FIXME: Output capture.
 # FIXME: Patch AbstractMovieWriter.saving.
 #
-# FIXME: Backreferences (as a rst directive) (perhaps from hunter?).
+# FIXME: Backreferences.
 # FIXME: Generate notebook from the rst-generated html.
 #
 # FIXME: Upstream fix to sphinx-jinja.
@@ -275,31 +275,25 @@ class Exhibit(SourceGetterMixin):
             assert False
 
 
+DocRef = namedtuple("DocRef", "role lookups")
+
+
 # FIXME: classmethod, staticmethod.
 def get_doc_ref(obj, source_name):
     if getattr(obj, "__name__", object()) != source_name:
         return None
-    elif isinstance(obj, ModuleType):
-        return SimpleNamespace(
-            role="py:module",
-            name=obj.__name__,
-            lookups=[obj.__name__])
-    elif not hasattr(obj, "__module__"):
+    if isinstance(obj, ModuleType):
+        return DocRef("py:module", [obj.__name__])
+    if not hasattr(obj, "__module__"):
         return None
+    lookups = [obj.__module__ + "." + obj.__qualname__,
+               obj.__qualname__]
+    if isinstance(obj, type):
+        return DocRef("py:class", lookups)
     elif isinstance(obj, FunctionType) and "." not in obj.__qualname__:
-        return SimpleNamespace(
-            role="py:function",
-            module=obj.__module__,
-            qualname=obj.__qualname__,
-            lookups=[obj.__module__ + "." + obj.__qualname__,
-                     obj.__qualname__])
-    elif isinstance(obj, MethodType):
-        return SimpleNamespace(
-            role="py:method",
-            module=obj.__module__,
-            qualname=obj.__qualname__,
-            lookups=[obj.__module__ + "." + obj.__qualname__,
-                     obj.__qualname__])
+        return DocRef("py:function", lookups)
+    elif isinstance(obj, (MethodType, FunctionType)):  # also bound methods.
+        return DocRef("py:method", lookups)
     else:
         raise TypeError(
             "Named module-level object of unknown type: {!r}".format(obj))
@@ -467,7 +461,22 @@ def build_finished(app, exc):
     if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
         return
     inv = {}
-    for role, role_inv in app.env.intersphinx_inventory.items():
+    py_domain = "py"
+    # Adapted from InventoryFile.{dump,load_v2}, without the
+    # $-compression/decompression step.
+    for name, dispname, role, docname, anchor, prio \
+            in sorted(app.env.domains[py_domain].get_objects()):
+        uri = app.builder.get_target_uri(docname)
+        if anchor:
+            uri += "#" + anchor
+        if dispname == name:
+            dispname = "-"
+        inv.setdefault(py_domain + ":" + role, {})[name] = (
+            app.env.config.project, app.env.config.version, uri, dispname)
+    if "sphinx.ext.intersphinx" in app.env.config.extensions:
+        for role, role_inv in app.env.intersphinx_inventory.items():
+            inv[role] = ChainMap(inv.get(role, {}), role_inv)
+    for role, role_inv in inv.items():
         suffixes_role_inv = {}
         for k, v in role_inv.items():
             parts = k.split(".")
@@ -479,12 +488,9 @@ def build_finished(app, exc):
             {suffix: vs[0] for suffix, vs in suffixes_role_inv.items()
              if len(vs) == 1})
     for docname in app.env.exhibit_state.docnames:
-        embed_annotations(inv, Path(app.outdir, docname).with_suffix(".html"),
-                          app.env.exhibit_state.docnames[docname].annotations)
+        embed_annotations(app, inv, docname)
 
 
-# FIXME: Also lookup the local inventory.
-# FIXME: Skip if intersphinx is inactive.
 def lookup_href(inv, doc_ref):
     role_inv = inv[doc_ref.role]
     entry = next(filter(None,
@@ -495,7 +501,16 @@ def lookup_href(inv, doc_ref):
         return location
 
 
-def embed_annotations(inv, html_path, annotations):
+def embed_annotations(app, inv, docname):
+    html_path = Path(app.outdir, docname).with_suffix(".html")
+    annotations = app.env.exhibit_state.docnames[docname].annotations
+
+    rel_prefix = "../" * (len(html_path.relative_to(app.outdir).parents) - 1)
+    def fix_rel_href(href):
+        if "://" not in href:
+            href = rel_prefix + href
+        return href
+
     tree = lxml.html.parse(str(html_path))
     root = tree.getroot()
     elems = root.findall(
@@ -522,7 +537,7 @@ def embed_annotations(inv, html_path, annotations):
             if not href:
                 continue
             assert elem.text == doc_ref.lookups[0].split(".")[-1]
-            link = lxml.html.Element("a", href=href)
+            link = lxml.html.Element("a", href=fix_rel_href(href))
             link.text = elem.text
             elem.text = ""
             elem.append(link)
