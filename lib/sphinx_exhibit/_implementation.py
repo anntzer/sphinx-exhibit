@@ -48,7 +48,7 @@ _deletion_notice = """\
 """
 
 
-class Stage(Enum):
+class Stage(Enum):  # backcompat: can use app.phase in sphinx>=1.8.
     RstGeneration, RstGenerated = range(2)
 
 
@@ -450,9 +450,8 @@ class ExhibitBlock(SourceGetterMixin):
 def env_merge_info(app, env, docnames, other):
     for path, other_info in other.exhibit_state.paths.items():
         this_info = env.state.exhibit_state.paths[path]
-        if (this_info.artefacts and other_info.artefacts
-                or this_info.annotations and other_info.annotations):
-            raise RuntimeError
+        assert not (this_info.artefacts and other_info.artefacts
+                    or this_info.annotations and other_info.annotations)
         this_info.artefacts = this_info.artefacts or other_info.artefacts
         this_info.annotations = this_info.annotations or other_info.annotations
 
