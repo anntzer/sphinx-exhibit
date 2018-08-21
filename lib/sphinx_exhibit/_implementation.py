@@ -329,12 +329,16 @@ class ExhibitSource(SourceGetterMixin):
         #   -> _sphinx_exhibit_attr_(foo, "bar", offset).bar
         #   (this one needs to be valid in a store context).
 
+        name_func_name = "!sphinx_exhibit_name"
+        attr_func_name = "!sphinx_exhibit_attr"
+        export_func_name = "!sphinx_exhibit_export"
+
         class Transformer(ast.NodeTransformer):
             def visit_Name(self, node):
                 return (
                     ast.fix_missing_locations(ast.copy_location(
                         ast.Call(
-                            ast.Name("_sphinx_exhibit_name_", ast.Load()),
+                            ast.Name(name_func_name, ast.Load()),
                             [node, ast.Str(node.id), ast.Num(node.offset)],
                             []),
                         node))
@@ -345,7 +349,7 @@ class ExhibitSource(SourceGetterMixin):
                 self.generic_visit(node)
                 node.value = ast.fix_missing_locations(ast.copy_location(
                     ast.Call(
-                        ast.Name("_sphinx_exhibit_attr_", ast.Load()),
+                        ast.Name(attr_func_name, ast.Load()),
                         [node.value, ast.Str(node.attr), ast.Num(node.offset)],
                         []),
                     node))
@@ -357,20 +361,20 @@ class ExhibitSource(SourceGetterMixin):
             inserted = ast.fix_missing_locations(
                 ast.Expr(
                     ast.Call(
-                        ast.Name("_sphinx_exhibit_export_", ast.Load()),
+                        ast.Name(export_func_name, ast.Load()),
                         [], []),
                     lineno=lineno))
             mod.body.append(inserted)
         mod.body.sort(key=lambda stmt: stmt.lineno)
         code = compile(mod, self.options["source"], "exec")
 
-        def _sphinx_exhibit_name_(obj, name, offset):
+        def sphinx_exhibit_name(obj, name, offset):
             doc_ref = get_doc_ref(obj, name)
             if doc_ref:
                 path_info.annotations.setdefault(offset, []).append(doc_ref)
             return obj
 
-        def _sphinx_exhibit_attr_(obj, name, offset):
+        def sphinx_exhibit_attr(obj, name, offset):
             attr = getattr(obj, name)
             doc_ref = get_doc_ref(attr, name)
             # FIXME: Also fetch py:attribute.
@@ -380,7 +384,7 @@ class ExhibitSource(SourceGetterMixin):
             return SimpleNamespace(**{name: attr})
 
         sg_base_num = 0
-        def _sphinx_exhibit_export_(
+        def sphinx_exhibit_export(
                 *, _block_counter=itertools.count()):
             nonlocal sg_base_num
             block_idx = next(_block_counter)
@@ -414,9 +418,9 @@ class ExhibitSource(SourceGetterMixin):
             try:
                 mpl.testing.decorators.cleanup("default")(lambda: exec(
                     code,
-                    {"_sphinx_exhibit_name_": _sphinx_exhibit_name_,
-                     "_sphinx_exhibit_attr_": _sphinx_exhibit_attr_,
-                     "_sphinx_exhibit_export_": _sphinx_exhibit_export_,
+                    {name_func_name: sphinx_exhibit_name,
+                     attr_func_name: sphinx_exhibit_attr,
+                     export_func_name: sphinx_exhibit_export,
                      "__file__": self.options["source"],
                      "__name__": "__main__"}))()
             # FIXME: Report error.
