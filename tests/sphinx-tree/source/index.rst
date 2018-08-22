@@ -7,3 +7,7 @@
 .. py:class:: super()
 
    a stub reference for testing
+
+The examples that use `super` are
+
+.. exhibit-backrefs:: py:class super

@@ -30,6 +30,7 @@ from matplotlib import pyplot as plt
 import sphinx
 from sphinx.builders.dummy import DummyBuilder
 from sphinx.environment import BuildEnvironment
+from sphinx.transforms import SphinxTransform
 
 from . import _lib2to3_parser, _offset_annotator, _util, __version__
 
@@ -58,10 +59,10 @@ class Style(Enum):
     None_ = "none"
 
 
-State = namedtuple("State", "stage docnames")
+State = namedtuple("State", "stage docnames backrefs")
 
 
-class PathInfo:
+class DocInfo:
     def __init__(self):
         # NOTE: if adding fields, update merging procedure in env_merge_info.
         self.code_line_idxs = None
@@ -71,7 +72,7 @@ class PathInfo:
 
 def builder_inited(app):
     env = BuildEnvironment(app)
-    env.exhibit_state = State(Stage.RstGeneration, {})
+    env.exhibit_state = State(Stage.RstGeneration, {}, {})
     env.find_files(app.config, DummyBuilder(app))
     exhibits = []
     for docname in env.found_docs:
@@ -95,9 +96,12 @@ def builder_inited(app):
             docutils.core.publish_doctree(
                 contents, source_path=path, settings_overrides={"env": env})
     app.env.exhibit_state = State(
-        Stage.RstGenerated, env.exhibit_state.docnames)
+        Stage.RstGenerated, env.exhibit_state.docnames, {})
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
+    rst.directives.register_directive("exhibit-backrefs", ExhibitBackrefs)
+    app.add_node(exhibit_backrefs)
+    app.add_post_transform(TransformExhibitBackrefs)
 
 
 def split_text_and_code_blocks(src):
@@ -260,8 +264,8 @@ class Exhibit(SourceGetterMixin):
                 _util.ensure_contents(dest_path, rst_source)
                 # FIXME: Also arrange to delete this file.
                 shutil.copyfile(src_path, dest_path.parent / src_path.name)
-                e_state.docnames[docname] = path_info = PathInfo()
-                path_info.code_line_idxs = code_line_idxs
+                e_state.docnames[docname] = doc_info = DocInfo()
+                doc_info.code_line_idxs = code_line_idxs
             return []
         elif e_state.stage is Stage.RstGenerated:
             cur_dir = self.get_current_source().parent
@@ -276,18 +280,19 @@ class Exhibit(SourceGetterMixin):
 
 
 DocRef = namedtuple("DocRef", "role lookups")
+Annotation = namedtuple("Annotation", "docrefs href")
 
 
 # FIXME: classmethod, staticmethod.
-def get_doc_ref(obj, source_name):
+def get_docref(obj, source_name):
     if getattr(obj, "__name__", object()) != source_name:
         return None
     if isinstance(obj, ModuleType):
-        return DocRef("py:module", [obj.__name__])
+        return DocRef("py:module", (obj.__name__,))
     if not hasattr(obj, "__module__"):
         return None
-    lookups = [obj.__module__ + "." + obj.__qualname__,
-               obj.__qualname__]
+    lookups = (obj.__module__ + "." + obj.__qualname__,
+               obj.__qualname__)
     if isinstance(obj, type):
         return DocRef("py:class", lookups)
     elif isinstance(obj, FunctionType) and "." not in obj.__qualname__:
@@ -312,15 +317,15 @@ class ExhibitSource(SourceGetterMixin):
         self.options.setdefault("output-style", Style.Native)
 
         e_state = self.state.document.settings.env.exhibit_state
-        path_info = e_state.docnames[self.get_current_docname()]
-        path_info.artefacts = [[] for _ in self.options["capture-after-lines"]]
-        path_info.annotations = {}
+        doc_info = e_state.docnames[self.get_current_docname()]
+        doc_info.artefacts = [[] for _ in self.options["capture-after-lines"]]
+        doc_info.annotations = {}
 
         if self.options["output-style"] is Style.None_:
             return []
 
         mod = _offset_annotator.parse(
-            self.options["source"], path_info.code_line_idxs)
+            self.options["source"], doc_info.code_line_idxs)
 
         # Rewrite:
         # - foo (Load context only)
@@ -369,17 +374,21 @@ class ExhibitSource(SourceGetterMixin):
         code = compile(mod, self.options["source"], "exec")
 
         def sphinx_exhibit_name(obj, name, offset):
-            doc_ref = get_doc_ref(obj, name)
-            if doc_ref:
-                path_info.annotations.setdefault(offset, []).append(doc_ref)
+            docref = get_docref(obj, name)
+            if docref:
+                (doc_info.annotations
+                 .setdefault(offset, Annotation(set(), None))
+                 .docrefs.add(docref))
             return obj
 
         def sphinx_exhibit_attr(obj, name, offset):
             attr = getattr(obj, name)
-            doc_ref = get_doc_ref(attr, name)
+            docref = get_docref(attr, name)
             # FIXME: Also fetch py:attribute.
-            if doc_ref:
-                path_info.annotations.setdefault(offset, []).append(doc_ref)
+            if docref:
+                (doc_info.annotations
+                 .setdefault(offset, Annotation(set(), None))
+                 .docrefs.add(docref))
             # Return a proxy object, to avoid triggering descriptors twice.
             return SimpleNamespace(**{name: attr})
 
@@ -402,7 +411,7 @@ class ExhibitSource(SourceGetterMixin):
                             sg_base_num + fignum))
                 else:
                     assert False
-                path_info.artefacts[block_idx].append(dest)
+                doc_info.artefacts[block_idx].append(dest)
                 plt.figure(fignum).savefig(dest)
             sg_base_num += len(plt.get_fignums())
             # FIXME: Make this configurable?
@@ -451,33 +460,30 @@ class ExhibitBlock(SourceGetterMixin):
         return node.children
 
 
-def env_merge_info(app, env, docnames, other):
-    for path, other_info in other.exhibit_state.paths.items():
-        this_info = env.state.exhibit_state.paths[path]
-        assert not (this_info.artefacts and other_info.artefacts
-                    or this_info.annotations and other_info.annotations)
-        this_info.artefacts = this_info.artefacts or other_info.artefacts
-        this_info.annotations = this_info.annotations or other_info.annotations
+def resolve_docrefs(env):
+    """
+    Resolve the runtime annotations.
 
+    After this step, resolved annotations contain a single DocRef which
+    contains a single lookup.
+    """
 
-def build_finished(app, exc):
-    if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
-        return
+    # Construct the merged inventory.
     inv = {}
     py_domain = "py"
     # Adapted from InventoryFile.{dump,load_v2}, without the
     # $-compression/decompression step.
     for name, dispname, role, docname, anchor, prio \
-            in sorted(app.env.domains[py_domain].get_objects()):
-        uri = app.builder.get_target_uri(docname)
+            in sorted(env.domains[py_domain].get_objects()):
+        uri = env.app.builder.get_target_uri(docname)
         if anchor:
             uri += "#" + anchor
         if dispname == name:
             dispname = "-"
         inv.setdefault(py_domain + ":" + role, {})[name] = (
-            app.env.config.project, app.env.config.version, uri, dispname)
-    if "sphinx.ext.intersphinx" in app.env.config.extensions:
-        for role, role_inv in app.env.intersphinx_inventory.items():
+            env.config.project, env.config.version, uri, dispname)
+    if "sphinx.ext.intersphinx" in env.config.extensions:
+        for role, role_inv in env.intersphinx_inventory.items():
             inv[role] = ChainMap(inv.get(role, {}), role_inv)
     for role, role_inv in inv.items():
         suffixes_role_inv = {}
@@ -490,22 +496,106 @@ def build_finished(app, exc):
             # Only keep unambiguous suffixes.
             {suffix: vs[0] for suffix, vs in suffixes_role_inv.items()
              if len(vs) == 1})
+
+    def resolve_annotation(annotation):
+        if len(annotation.docrefs) == 1:  # Otherwise, would be ambiguous.
+            docref, = annotation.docrefs
+            role_inv = inv.get(docref.role, {})
+            for lookup in docref.lookups:
+                try:
+                    projname, version, location, dispname = role_inv[lookup]
+                except KeyError:
+                    continue
+                return annotation._replace(
+                    docrefs={docref._replace(lookups=(lookup,))},
+                    href=location)
+        return annotation
+
+    # Resolve the docrefs.
+    for docname, doc_info in env.exhibit_state.docnames.items():
+        for offset, annotation in doc_info.annotations.items():
+            if len(annotation.docrefs) == 1:  # Other annots. are ambiguous.
+                docref, = annotation.docrefs
+                doc_info.annotations[offset] = resolve_annotation(annotation)
+
+
+def compute_backrefs(env):
+    for docname, doc_info in env.exhibit_state.docnames.items():
+        for annotation in doc_info.annotations.values():
+            if annotation.href:  # Resolved, so single values below.
+                docref, = annotation.docrefs
+                lookup, = docref.lookups
+                (env.exhibit_state.backrefs
+                 .setdefault((docref.role, lookup), set())
+                 .add(docname))
+
+
+class exhibit_backrefs(rst.nodes.Element):
+    pass
+
+
+class ExhibitBackrefs(rst.Directive):
+    required_arguments = 2
+
+    def run(self):
+        role, name = self.arguments
+        return [exhibit_backrefs(role=role, name=name)]
+
+
+class TransformExhibitBackrefs(SphinxTransform):
+    default_priority = 400
+
+    def apply(self):
+        resolve_docrefs(self.env)
+        compute_backrefs(self.env)
+
+        class ExhibitBackrefsVisitor(rst.nodes.SparseNodeVisitor):
+            def visit_exhibit_backrefs(_, node):
+                # FIXME: Directly build the docutils tree.  (Tried...)
+                # FIXME: This is going to run into issues when the rawsource
+                # contains sphinx-specific markup...
+                bullets = []
+                titles = []
+                hrefs = []
+                for idx, docname in enumerate(sorted(
+                        self.env.exhibit_state.backrefs.get(
+                            (node.attributes["role"],
+                             node.attributes["name"])))):
+                    title = self.env.titles[docname][0].rawsource
+                    html_fname = ("../" * self.env.docname.count("/")
+                                  + docname + self.app.builder.out_suffix)
+                    bullets.append("- |id{}|__\n".format(idx))
+                    titles.append(".. |id{}| replace:: {}\n".format(idx, title))
+                    hrefs.append("__ {}\n".format(html_fname))
+                new = docutils.core.publish_doctree(
+                    "".join(bullets)
+                    + "\n" + "".join(titles)
+                    + "\n" + "".join(hrefs))
+                node.parent.replace(node, new.children)
+
+        self.document.walkabout(ExhibitBackrefsVisitor(self.document))
+        for node in self.document.traverse(exhibit_backrefs):
+            node.parent.remove(node)
+
+
+def env_merge_info(app, env, docnames, other):
+    for path, other_info in other.exhibit_state.paths.items():
+        info = env.state.exhibit_state.paths[path]
+        assert not (info.artefacts and other_info.artefacts
+                    or info.annotations and other_info.annotations)
+        info.artefacts = info.artefacts or other_info.artefacts
+        info.annotations = info.annotations or other_info.annotations
+
+
+def build_finished(app, exc):
+    if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
+        return
     for docname in app.env.exhibit_state.docnames:
-        embed_annotations(app, inv, docname)
+        embed_annotations(app, docname)
 
 
-def lookup_href(inv, doc_ref):
-    role_inv = inv[doc_ref.role]
-    entry = next(filter(None,
-                        (role_inv.get(lookup) for lookup in doc_ref.lookups)),
-                 None)
-    if entry:
-        projname, version, location, dispname = entry
-        return location
-
-
-def embed_annotations(app, inv, docname):
-    html_path = Path(app.outdir, docname).with_suffix(".html")
+def embed_annotations(app, docname):
+    html_path = Path(app.builder.get_outfilename(docname))
     annotations = app.env.exhibit_state.docnames[docname].annotations
 
     rel_prefix = "../" * (len(html_path.relative_to(app.outdir).parents) - 1)
@@ -521,29 +611,27 @@ def embed_annotations(app, inv, docname):
     offset = 0
     offset_to_elem = {}
 
-    def visit(elem, _depth=0):
+    def visit(elem):
         nonlocal offset
         offset_to_elem[offset] = elem
         offset += len(elem.text or "")
         for child in elem:
-            visit(child, _depth+1)
+            visit(child)
         offset += len(elem.tail or "")
 
     for elem in elems:
         visit(elem)
 
-    for offset, doc_refs in annotations.items():
-        if len(doc_refs) == 1:
-            elem = offset_to_elem[offset]
-            doc_ref, = doc_refs
-            href = lookup_href(inv, doc_ref)
-            if not href:
-                continue
-            assert elem.text == doc_ref.lookups[0].split(".")[-1]
-            link = lxml.html.Element("a", href=fix_rel_href(href))
-            link.text = elem.text
-            elem.text = ""
-            elem.append(link)
+    for offset, annotation in annotations.items():
+        elem = offset_to_elem[offset]
+        if not annotation.href:
+            continue
+        assert elem.text \
+            == next(iter(annotation.docrefs)).lookups[0].split(".")[-1]
+        link = lxml.html.Element("a", href=fix_rel_href(annotation.href))
+        link.text = elem.text
+        elem.text = ""
+        elem.append(link)
 
     tree.write(str(html_path))
 
