@@ -6,7 +6,10 @@ import tokenize
 
 def iter_attribute_tokens(fname):
     with open(fname, "rb") as file:
-        tokens = tokenize.tokenize(file.readline)
+        # The call to filter handles cases where an attribute access dot is at
+        # the end of a line and the attribute itself on the next one.
+        tokens = filter(lambda token: token.string != "\n",
+                        tokenize.tokenize(file.readline))
         for token in tokens:
             if token.string == ".":
                 yield next(tokens)  # Also catches submodule imports :/
@@ -41,6 +44,29 @@ def parse(fname, code_line_idxs):
                 if node.attr == token.string:
                     break
             node.offset = to_offset(*token.start)
+
+        # These are only necessary to handle fields in the order in which they
+        # appear in the source, rather than the order they appear in the node.
+        def visit_FunctionDef(self, node):
+            for expr in node.decorator_list:
+                self.visit(expr)
+            self.visit(node.args)
+            if node.returns:
+                self.visit(node.returns)
+            for stmt in node.body:
+                self.visit(stmt)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node):
+            for expr in node.decorator_list:
+                self.visit(expr)
+            for expr in node.bases:
+                self.visit(expr)
+            for keyword in node.keywords:
+                self.visit(keyword)
+            for stmt in node.body:
+                self.visit(stmt)
 
     mod = ast.parse(source)
     OffsetAnnotator().visit(mod)

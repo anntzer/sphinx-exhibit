@@ -296,7 +296,7 @@ def get_docref(obj, source_name):
         return None
     if isinstance(obj, ModuleType):
         return DocRef("py:module", (obj.__name__,))
-    if not hasattr(obj, "__module__"):
+    if not (hasattr(obj, "__module__") and hasattr(obj, "__qualname__")):
         return None
     lookups = ((obj.__module__ + "." + obj.__qualname__, obj.__qualname__)
                if obj.__module__ is not None
@@ -447,7 +447,6 @@ class ExhibitSource(SourceGetterMixin):
                      "__name__": "__main__"}))()
             # FIXME: Report error.
             except (Exception, SystemExit):
-                raise
                 pass
 
         return []
@@ -558,7 +557,7 @@ class ExhibitBackrefs(rst.Directive):
         vl = ViewList([
             "* :doc:`{}`".format(docname)
             for docname
-            in sorted(env.exhibit_state.backrefs.get((role, name)))])
+            in sorted(env.exhibit_state.backrefs.get((role, name), []))])
         node = rst.nodes.Element()
         self.state.nested_parse(vl, 0, node)
         return node.children
