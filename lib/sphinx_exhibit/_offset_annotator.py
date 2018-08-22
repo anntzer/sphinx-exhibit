@@ -34,6 +34,10 @@ def parse(fname, code_line_idxs):
     class OffsetAnnotator(ast.NodeVisitor):
         def visit_Name(self, node):
             self.generic_visit(node)
+            # NOTE: For decorators, this will miss the "@" just before.  This
+            # is taken into account at the annotation embedding stage.
+            # NOTE: Something funky is going on with whether @foo.bar is
+            # highlighted fully as a decorator or only partially...
             node.offset = to_offset(node.lineno, node.col_offset)
 
         def visit_Attribute(self, node):

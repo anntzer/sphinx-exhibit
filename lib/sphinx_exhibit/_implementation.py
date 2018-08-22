@@ -8,11 +8,13 @@
 
 import ast
 from collections import ChainMap, namedtuple
+import contextlib
 import copy
 from enum import Enum
 import functools
 import itertools
 from lib2to3 import pygram
+import os
 import re
 from pathlib import Path
 import shutil
@@ -229,10 +231,12 @@ class Exhibit(SourceGetterMixin):
         for line in self.content:
             if line.startswith("!"):
                 excluded = sorted(src_dir.glob(line[1:]))
-                _log.info("expanding (for removal) %s (in %s) to %s.",
-                          line, src_dir.relative_to(env.srcdir),
-                          " ".join(str(path.relative_to(src_dir))
-                                   for path in excluded))
+                # Log just once.
+                if env.exhibit_state.stage is Stage.RstGeneration:
+                    _log.info("expanding (for removal) %s (in %s) to %s.",
+                              line, src_dir.relative_to(env.srcdir),
+                              " ".join(str(path.relative_to(src_dir))
+                                       for path in excluded))
                 for path in excluded:
                     try:
                         src_paths.remove(path)
@@ -242,10 +246,12 @@ class Exhibit(SourceGetterMixin):
                 if line.startswith(r"\!"):
                     line = line[1:]
                 added = sorted(src_dir.glob(line))
-                _log.info("expanding (for addition) %s (in %s) to %s.",
-                          line, src_dir.relative_to(env.srcdir),
-                          " ".join(str(path.relative_to(src_dir))
-                                   for path in added))
+                # Log just once.
+                if env.exhibit_state.stage is Stage.RstGeneration:
+                    _log.info("expanding (for addition) %s (in %s) to %s.",
+                              line, src_dir.relative_to(env.srcdir),
+                              " ".join(str(path.relative_to(src_dir))
+                                       for path in added))
                 src_paths.extend(added)
         return [(src_path,
                  Path(cur_dir,
@@ -436,7 +442,10 @@ class ExhibitSource(SourceGetterMixin):
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
         with _util.chdir_cm(Path(self.options["source"]).parent), \
-                warnings.catch_warnings():
+                warnings.catch_warnings(), \
+                open(os.devnull, "w") as devnull, \
+                contextlib.redirect_stdout(devnull), \
+                contextlib.redirect_stderr(devnull):
             try:
                 mpl.testing.decorators.cleanup("default")(lambda: exec(
                     code,
@@ -473,7 +482,7 @@ class ExhibitBlock(SourceGetterMixin):
 
 
 @functools.lru_cache()
-def resolve_docrefs(env):
+def ensure_resolved_docrefs(env):
     """
     Resolve the runtime annotations.
 
@@ -550,7 +559,7 @@ class ExhibitBackrefs(rst.Directive):
     def run(self):
         # FIXME: Add warning if we re-run into ExhibitSource later.
         env = self.state.document.settings.env
-        resolve_docrefs(env)
+        ensure_resolved_docrefs(env)
         compute_backrefs(env)
 
         role, name = self.arguments
@@ -575,6 +584,7 @@ def env_merge_info(app, env, docnames, other):
 def build_finished(app, exc):
     if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
         return
+    ensure_resolved_docrefs(app.env)
     for docname in app.env.exhibit_state.docnames:
         embed_annotations(app, docname)
 
@@ -608,11 +618,29 @@ def embed_annotations(app, docname):
         visit(elem)
 
     for offset, annotation in annotations.items():
-        elem = offset_to_elem[offset]
+        try:
+            elem = offset_to_elem[offset]
+            expected_prefix = ""
+        except KeyError:
+            # Should be a decorator.
+            # NOTE: Although the grammar theoretically allows whitespace after
+            # the "@", this is never seen in practice and more importantly not
+            # parsed correctly by pygments anyways.
+            try:
+                elem = offset_to_elem[offset - 1]
+                expected_prefix = "@"
+            except KeyError:
+                _log.warning(  # Can happen with composite decorators...
+                    "In {}, dropping annotation {} not matching highlighting "
+                    "at offset {}.".format(docname, annotation, offset),
+                    type="sphinx-exhibit", subtype="embedding")
+                continue
+
         if not annotation.href:
             continue
-        assert elem.text \
-            == next(iter(annotation.docrefs)).lookups[0].split(".")[-1]
+        assert elem.text == (
+            expected_prefix
+            + list(annotation.docrefs)[0].lookups[0].split(".")[-1])
         link = lxml.html.Element("a", href=fix_rel_href(annotation.href))
         link.text = elem.text
         elem.text = ""
