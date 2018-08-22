@@ -10,6 +10,7 @@ import ast
 from collections import ChainMap, namedtuple
 import copy
 from enum import Enum
+import functools
 import itertools
 from lib2to3 import pygram
 import re
@@ -30,7 +31,6 @@ from matplotlib import pyplot as plt
 import sphinx
 from sphinx.builders.dummy import DummyBuilder
 from sphinx.environment import BuildEnvironment
-from sphinx.transforms import SphinxTransform
 
 from . import _lib2to3_parser, _offset_annotator, _util, __version__
 
@@ -100,8 +100,6 @@ def builder_inited(app):
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
     rst.directives.register_directive("exhibit-backrefs", ExhibitBackrefs)
-    app.add_node(exhibit_backrefs)
-    app.add_post_transform(TransformExhibitBackrefs)
 
 
 def split_text_and_code_blocks(src):
@@ -136,6 +134,12 @@ def split_text_and_code_blocks(src):
             nodes[0].prefix = ""
             string = "".join(map(str, nodes)).rstrip("\n") + "\n"
         yield tp, string, linenos[0]
+
+
+def env_before_read_docs(app, env, docnames):
+    docnames[:] = sorted(
+        docnames,
+        key=lambda docname: 0 if docname in env.exhibit_state.docnames else 1)
 
 
 def process_py_source(
@@ -469,6 +473,7 @@ class ExhibitBlock(SourceGetterMixin):
         return node.children
 
 
+@functools.lru_cache()
 def resolve_docrefs(env):
     """
     Resolve the runtime annotations.
@@ -528,6 +533,7 @@ def resolve_docrefs(env):
                 doc_info.annotations[offset] = resolve_annotation(annotation)
 
 
+@functools.lru_cache()
 def compute_backrefs(env):
     for docname, doc_info in env.exhibit_state.docnames.items():
         for annotation in doc_info.annotations.values():
@@ -539,52 +545,23 @@ def compute_backrefs(env):
                  .add(docname))
 
 
-class exhibit_backrefs(rst.nodes.Element):
-    pass
-
-
 class ExhibitBackrefs(rst.Directive):
     required_arguments = 2
 
     def run(self):
+        # FIXME: Add warning if we re-run into ExhibitSource later.
+        env = self.state.document.settings.env
+        resolve_docrefs(env)
+        compute_backrefs(env)
+
         role, name = self.arguments
-        return [exhibit_backrefs(role=role, name=name)]
-
-
-class TransformExhibitBackrefs(SphinxTransform):
-    default_priority = 400
-
-    def apply(self):
-        resolve_docrefs(self.env)
-        compute_backrefs(self.env)
-
-        class ExhibitBackrefsVisitor(rst.nodes.SparseNodeVisitor):
-            def visit_exhibit_backrefs(_, node):
-                # FIXME: Directly build the docutils tree.  (Tried...)
-                # FIXME: This is going to run into issues when the rawsource
-                # contains sphinx-specific markup...
-                bullets = []
-                titles = []
-                hrefs = []
-                for idx, docname in enumerate(sorted(
-                        self.env.exhibit_state.backrefs.get(
-                            (node.attributes["role"],
-                             node.attributes["name"])))):
-                    title = self.env.titles[docname][0].rawsource
-                    html_fname = ("../" * self.env.docname.count("/")
-                                  + docname + self.app.builder.out_suffix)
-                    bullets.append("- |id{}|__\n".format(idx))
-                    titles.append(".. |id{}| replace:: {}\n".format(idx, title))
-                    hrefs.append("__ {}\n".format(html_fname))
-                new = docutils.core.publish_doctree(
-                    "".join(bullets)
-                    + "\n" + "".join(titles)
-                    + "\n" + "".join(hrefs))
-                node.parent.replace(node, new.children)
-
-        self.document.walkabout(ExhibitBackrefsVisitor(self.document))
-        for node in self.document.traverse(exhibit_backrefs):
-            node.parent.remove(node)
+        vl = ViewList([
+            "* :doc:`{}`".format(docname)
+            for docname
+            in sorted(env.exhibit_state.backrefs.get((role, name)))])
+        node = rst.nodes.Element()
+        self.state.nested_parse(vl, 0, node)
+        return node.children
 
 
 def env_merge_info(app, env, docnames, other):
@@ -647,6 +624,7 @@ def embed_annotations(app, docname):
 
 def setup(app):
     app.connect("builder-inited", builder_inited)
+    app.connect("env-before-read-docs", env_before_read_docs)
     app.connect("env-merge-info", env_merge_info)
     app.connect("build-finished", build_finished)
     return {"version": __version__,
