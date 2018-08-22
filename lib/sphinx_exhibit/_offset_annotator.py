@@ -9,7 +9,7 @@ def iter_attribute_tokens(fname):
         tokens = tokenize.tokenize(file.readline)
         for token in tokens:
             if token.string == ".":
-                yield next(tokens)
+                yield next(tokens)  # Also catches submodule imports :/
 
 
 def parse(fname, code_line_idxs):
@@ -35,8 +35,11 @@ def parse(fname, code_line_idxs):
 
         def visit_Attribute(self, node):
             self.generic_visit(node)
-            token = next(attr_tokens)
-            assert node.attr == token.string
+            while True:
+                # Skip spurious ".foo" coming from submodule imports.
+                token = next(attr_tokens)
+                if node.attr == token.string:
+                    break
             node.offset = to_offset(*token.start)
 
     mod = ast.parse(source)

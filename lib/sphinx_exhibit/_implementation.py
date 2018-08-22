@@ -17,7 +17,7 @@ from pathlib import Path
 import shutil
 import textwrap
 import tokenize
-from types import FunctionType, MethodType, ModuleType, SimpleNamespace
+from types import BuiltinFunctionType, FunctionType, MethodType, ModuleType
 import warnings
 
 import docutils
@@ -188,7 +188,6 @@ def process_py_source(
                   + ":orphan:\n"
                   + "\n"
                   + ".. exhibit-source::\n"
-                  # FIXME: Relative path here?
                   + "   :source: {}\n".format(src_path)
                   + "   :capture-after-lines: {}\n".format(
                       " ".join(map(str, capture_after_lines)))
@@ -204,8 +203,9 @@ class SourceGetterMixin(rst.Directive):
         return self.state.document.settings.env.docname
 
     def get_current_source(self):
-        return Path(self.state.document.settings.env.doc2path(
-            self.get_current_docname()))
+        env = self.state.document.settings.env
+        return (Path(env.doc2path(self.get_current_docname()))
+                .relative_to(env.srcdir))
 
 
 class Exhibit(SourceGetterMixin):
@@ -218,14 +218,15 @@ class Exhibit(SourceGetterMixin):
     has_content = True
 
     def get_src_paths_and_docnames(self):
+        env = self.state.document.settings.env
         cur_dir = self.get_current_source().parent
-        src_dir = cur_dir / self.options["srcdir"]
+        src_dir = env.srcdir / cur_dir / self.options["srcdir"]
         src_paths = []
         for line in self.content:
             if line.startswith("!"):
                 excluded = sorted(src_dir.glob(line[1:]))
                 _log.info("expanding (for removal) %s (in %s) to %s.",
-                          line, src_dir,
+                          line, src_dir.relative_to(env.srcdir),
                           " ".join(str(path.relative_to(src_dir))
                                    for path in excluded))
                 for path in excluded:
@@ -238,12 +239,14 @@ class Exhibit(SourceGetterMixin):
                     line = line[1:]
                 added = sorted(src_dir.glob(line))
                 _log.info("expanding (for addition) %s (in %s) to %s.",
-                          line, src_dir,
+                          line, src_dir.relative_to(env.srcdir),
                           " ".join(str(path.relative_to(src_dir))
                                    for path in added))
                 src_paths.extend(added)
         return [(src_path,
-                 Path(self.options["destdir"], src_path.relative_to(src_dir))
+                 Path(cur_dir,
+                      self.options["destdir"],
+                      src_path.relative_to(src_dir))
                  .with_suffix("").as_posix())
                 for src_path in src_paths]
 
@@ -291,13 +294,17 @@ def get_docref(obj, source_name):
         return DocRef("py:module", (obj.__name__,))
     if not hasattr(obj, "__module__"):
         return None
-    lookups = (obj.__module__ + "." + obj.__qualname__,
-               obj.__qualname__)
+    lookups = ((obj.__module__ + "." + obj.__qualname__, obj.__qualname__)
+               if obj.__module__ is not None
+               # Happens with extension functions, e.g. RandomState.seed.
+               else (obj.__qualname__,))
     if isinstance(obj, type):
         return DocRef("py:class", lookups)
-    elif isinstance(obj, FunctionType) and "." not in obj.__qualname__:
+    elif (isinstance(obj, (FunctionType, BuiltinFunctionType))
+          and "." not in obj.__qualname__):
         return DocRef("py:function", lookups)
-    elif isinstance(obj, (MethodType, FunctionType)):  # also bound methods.
+    elif isinstance(obj, (MethodType, FunctionType, BuiltinFunctionType)):
+        # Bound and unbound methods.
         return DocRef("py:method", lookups)
     else:
         raise TypeError(
@@ -316,8 +323,8 @@ class ExhibitSource(SourceGetterMixin):
     def run(self):
         self.options.setdefault("output-style", Style.Native)
 
-        e_state = self.state.document.settings.env.exhibit_state
-        doc_info = e_state.docnames[self.get_current_docname()]
+        env = self.state.document.settings.env
+        doc_info = env.exhibit_state.docnames[self.get_current_docname()]
         doc_info.artefacts = [[] for _ in self.options["capture-after-lines"]]
         doc_info.annotations = {}
 
@@ -327,12 +334,11 @@ class ExhibitSource(SourceGetterMixin):
         mod = _offset_annotator.parse(
             self.options["source"], doc_info.code_line_idxs)
 
-        # Rewrite:
-        # - foo (Load context only)
+        # Rewrite (Load context only):
+        # - foo
         #   -> _sphinx_exhibit_name_(foo, "foo", offset)
-        # - foo.bar (any context)
-        #   -> _sphinx_exhibit_attr_(foo, "bar", offset).bar
-        #   (this one needs to be valid in a store context).
+        # - foo.bar
+        #   -> _sphinx_exhibit_attr_(foo, "bar", offset)
 
         name_func_name = "!sphinx_exhibit_name"
         attr_func_name = "!sphinx_exhibit_attr"
@@ -352,13 +358,15 @@ class ExhibitSource(SourceGetterMixin):
 
             def visit_Attribute(self, node):
                 self.generic_visit(node)
-                node.value = ast.fix_missing_locations(ast.copy_location(
-                    ast.Call(
-                        ast.Name(attr_func_name, ast.Load()),
-                        [node.value, ast.Str(node.attr), ast.Num(node.offset)],
-                        []),
-                    node))
-                return node
+                return (
+                    ast.fix_missing_locations(ast.copy_location(
+                        ast.Call(
+                            ast.Name(attr_func_name, ast.Load()),
+                            [node.value, ast.Str(node.attr), ast.Num(node.offset)],
+                            []),
+                        node))
+                    if type(node.ctx) == ast.Load else
+                    node)
 
         mod = Transformer().visit(mod)
 
@@ -389,8 +397,7 @@ class ExhibitSource(SourceGetterMixin):
                 (doc_info.annotations
                  .setdefault(offset, Annotation(set(), None))
                  .docrefs.add(docref))
-            # Return a proxy object, to avoid triggering descriptors twice.
-            return SimpleNamespace(**{name: attr})
+            return attr
 
         sg_base_num = 0
         def sphinx_exhibit_export(
@@ -399,19 +406,21 @@ class ExhibitSource(SourceGetterMixin):
             block_idx = next(_block_counter)
             for fig_idx, fignum in enumerate(plt.get_fignums()):
                 if self.options["output-style"] is Style.Native:
-                    dest = Path("{}-{}-{}.png".format(
-                        self.get_current_source(), block_idx, fig_idx))
+                    dest = Path(
+                        env.srcdir,
+                        "{}-{}-{}.png".format(env.docname, block_idx, fig_idx))
                 elif self.options["output-style"] is Style.SG:
-                    dir_path = self.get_current_source().parent / "images"
+                    dir_path = (env.srcdir
+                                / self.get_current_source().parent
+                                / "images")
                     dir_path.mkdir(exist_ok=True)
                     dest = Path(
                         dir_path / "sphx_glr_{}_{:03}.png".format(
-                            Path(self.state.document.settings.env.docname).name
-                            .replace("/", "_"),
-                            sg_base_num + fignum))
+                            Path(env.docname).name, sg_base_num + fignum))
                 else:
                     assert False
-                doc_info.artefacts[block_idx].append(dest)
+                doc_info.artefacts[block_idx].append(
+                    dest.relative_to(env.srcdir))
                 plt.figure(fignum).savefig(dest)
             sg_base_num += len(plt.get_fignums())
             # FIXME: Make this configurable?
