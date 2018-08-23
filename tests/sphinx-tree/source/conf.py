@@ -1,15 +1,16 @@
 # -- General configuration ------------------------------------------------
 
 extensions = [
-    'sphinx_exhibit',
-    'sphinx.ext.intersphinx',
+    "sphinx_exhibit",
+    "sphinx.ext.intersphinx",
 ]
 
-source_suffix = '.rst'
-master_doc = 'index'
+source_suffix = ".rst"
+master_doc = "index"
 
-rst_epilog = 'This is the real end.'
+rst_epilog = "This is the real end."
 
 intersphinx_mapping = {
-    'matplotlib': ('https://matplotlib.org', None),
+    "matplotlib": ("https://matplotlib.org", None),
+    "numpy": ("https://docs.scipy.org/doc/numpy", None),
 }

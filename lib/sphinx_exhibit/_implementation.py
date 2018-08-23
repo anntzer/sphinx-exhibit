@@ -296,9 +296,12 @@ DocRef = namedtuple("DocRef", "role lookups")
 Annotation = namedtuple("Annotation", "docrefs href")
 
 
-# FIXME: classmethod, staticmethod.
-def get_docref(obj, source_name):
-    if getattr(obj, "__name__", object()) != source_name:
+def get_docref(obj, source_name, parent=None):
+    if isinstance(parent, ModuleType):
+        if hasattr(obj, "__name__") and obj.__name__ != source_name:
+            return None
+        return DocRef("any", (parent.__name__ + "." + source_name,))
+    if not hasattr(obj, "__name__") or obj.__name__ != source_name:
         return None
     if isinstance(obj, ModuleType):
         return DocRef("py:module", (obj.__name__,))
@@ -314,7 +317,8 @@ def get_docref(obj, source_name):
           and "." not in obj.__qualname__):
         return DocRef("py:function", lookups)
     elif isinstance(obj, (MethodType, FunctionType, BuiltinFunctionType)):
-        # Bound and unbound methods.
+        # Bound and unbound methods, also (bound) classmethods and
+        # staticmethods (roles added by resolve_annotation).
         return DocRef("py:method", lookups)
     else:
         raise TypeError(
@@ -401,8 +405,7 @@ class ExhibitSource(SourceGetterMixin):
 
         def sphinx_exhibit_attr(obj, name, offset):
             attr = getattr(obj, name)
-            docref = get_docref(attr, name)
-            # FIXME: Also fetch py:attribute.
+            docref = get_docref(attr, name, parent=obj)
             if docref:
                 (doc_info.annotations
                  .setdefault(offset, Annotation(set(), None))
@@ -516,21 +519,34 @@ def ensure_resolved_docrefs(env):
         inv[role] = ChainMap(
             role_inv,
             # Only keep unambiguous suffixes.
-            {suffix: vs[0] for suffix, vs in suffixes_role_inv.items()
+            {suffix: _util.item(vs) for suffix, vs in suffixes_role_inv.items()
              if len(vs) == 1})
 
     def resolve_annotation(annotation):
         if len(annotation.docrefs) == 1:  # Otherwise, would be ambiguous.
             docref, = annotation.docrefs
-            role_inv = inv.get(docref.role, {})
-            for lookup in docref.lookups:
-                try:
-                    projname, version, location, dispname = role_inv[lookup]
-                except KeyError:
-                    continue
-                return annotation._replace(
-                    docrefs={docref._replace(lookups=(lookup,))},
-                    href=location)
+
+            def lookup_given_role_inv(role_inv):
+                for lookup in docref.lookups:
+                    try:
+                        projname, version, location, dispname = \
+                            role_inv[lookup]
+                    except KeyError:
+                        continue
+                    return annotation._replace(
+                        docrefs={docref._replace(lookups=(lookup,))},
+                        href=location)
+
+            if docref.role == "any":
+                roles = inv
+            elif docref.role == "py:method":
+                roles = ["py:method", "py:classmethod", "py:staticmethod"]
+            else:
+                roles = [docref.role]
+            candidates = list(filter(None, (lookup_given_role_inv(inv[role])
+                                            for role in roles)))
+            if len(candidates) == 1:
+                return _util.item(candidates)
         return annotation
 
     # Resolve the docrefs.
@@ -640,7 +656,8 @@ def embed_annotations(app, docname):
             continue
         assert elem.text == (
             expected_prefix
-            + list(annotation.docrefs)[0].lookups[0].split(".")[-1])
+            + _util.item(_util.item(annotation.docrefs).lookups)
+              .split(".")[-1])
         link = lxml.html.Element("a", href=fix_rel_href(annotation.href))
         link.text = elem.text
         elem.text = ""
