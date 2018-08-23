@@ -95,6 +95,8 @@ def builder_inited(app):
             # document (e.g. when generating contents with .. jinja::), so
             # stash the docname in the env.
             env.prepare_settings(docname)
+            # FIXME: Add at least sphinx's default roles.
+            # FIXME: Only publish the topmost block containing the exhibit.
             docutils.core.publish_doctree(
                 contents, source_path=path, settings_overrides={"env": env})
     app.env.exhibit_state = State(
@@ -105,7 +107,7 @@ def builder_inited(app):
 
 
 def split_text_and_code_blocks(src):
-    tree = _lib2to3_parser.parse(src)
+    tree = _lib2to3_parser.parse(src)  # FIXME: Perhaps rewrite using tokenize.
 
     def _inner():
         for i, node in enumerate(tree.children):
