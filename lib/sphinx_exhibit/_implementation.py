@@ -65,11 +65,16 @@ State = namedtuple("State", "stage docnames backrefs")
 
 class DocInfo:
     def __init__(self):
-        # NOTE: if adding fields, update merging procedure in env_merge_info.
         self.code_line_idxs = None
         self.skip = False
         self.artefacts = []
         self.annotations = {}
+
+    def merge(self, other):
+        assert not (self.artefacts and other.artefacts
+                    or self.annotations and other.annotations)
+        self.artefacts = self.artefacts or other.artefacts
+        self.annotations = self.annotations or other.annotations
 
 
 def builder_inited(app):
@@ -607,10 +612,7 @@ class ExhibitBackrefs(rst.Directive):
 def env_merge_info(app, env, docnames, other):
     for path, other_info in other.exhibit_state.paths.items():
         info = env.state.exhibit_state.paths[path]
-        assert not (info.artefacts and other_info.artefacts
-                    or info.annotations and other_info.annotations)
-        info.artefacts = info.artefacts or other_info.artefacts
-        info.annotations = info.annotations or other_info.annotations
+        info.merge(other_info)
 
 
 def build_finished(app, exc):
