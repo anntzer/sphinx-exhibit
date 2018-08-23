@@ -193,8 +193,6 @@ def process_py_source(
             assert False
 
     rst_source = (_deletion_notice
-                  + ":orphan:\n"
-                  + "\n"
                   + ".. exhibit-source::\n"
                   + "   :source: {}\n".format(src_path)
                   + "   :capture-after-lines: {}\n".format(
@@ -284,11 +282,13 @@ class Exhibit(SourceGetterMixin):
             return []
         elif e_state.stage is Stage.RstGenerated:
             cur_dir = self.get_current_source().parent
-            vl = ViewList([
-                "* :doc:`{}`".format(docname)
-                for src_path, docname in self.get_src_paths_and_docnames()])
+            lines = ([".. toctree::",
+                      "   :maxdepth: 1",
+                      ""]
+                     + ["   /{}".format(docname)
+                        for _, docname in self.get_src_paths_and_docnames()])
             node = rst.nodes.Element()
-            self.state.nested_parse(vl, 0, node)
+            self.state.nested_parse(ViewList(lines), 0, node)
             return node.children
         else:
             assert False
