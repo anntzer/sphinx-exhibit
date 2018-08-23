@@ -284,9 +284,9 @@ class Exhibit(SourceGetterMixin):
             cur_dir = self.get_current_source().parent
             lines = ([".. toctree::",
                       "   :maxdepth: 1",
-                      ""]
-                     + ["   /{}".format(docname)
-                        for _, docname in self.get_src_paths_and_docnames()])
+                      ""] +
+                     ["   /{}".format(docname)
+                      for _, docname in self.get_src_paths_and_docnames()])
             node = rst.nodes.Element()
             self.state.nested_parse(ViewList(lines), 0, node)
             return node.children
@@ -475,9 +475,9 @@ class ExhibitBlock(SourceGetterMixin):
         current_source = self.get_current_source()
         paths = (e_state.docnames[self.get_current_docname()]
                  .artefacts[int(self.arguments[0])])
-        lines = ([".. code-block:: python", ""]
-                 + ["   " + line for line in self.content]
-                 + [""])
+        lines = ([".. code-block:: python", ""] +
+                 ["   " + line for line in self.content] +
+                 [""])
         for path in paths:
             lines.extend([
                 ".. image:: {}"
@@ -530,7 +530,14 @@ def ensure_resolved_docrefs(env):
         if len(annotation.docrefs) == 1:  # Otherwise, would be ambiguous.
             docref, = annotation.docrefs
 
-            def lookup_given_role_inv(role_inv):
+            if docref.role == "any":
+                roles = inv
+            elif docref.role == "py:method":
+                roles = ["py:method", "py:classmethod", "py:staticmethod"]
+            else:
+                roles = [docref.role]
+
+            def lookup_in_role_inv(role_inv):
                 for lookup in docref.lookups:
                     try:
                         projname, version, location, dispname = \
@@ -541,14 +548,9 @@ def ensure_resolved_docrefs(env):
                         docrefs={docref._replace(lookups=(lookup,))},
                         href=location)
 
-            if docref.role == "any":
-                roles = inv
-            elif docref.role == "py:method":
-                roles = ["py:method", "py:classmethod", "py:staticmethod"]
-            else:
-                roles = [docref.role]
-            candidates = list(filter(None, (lookup_given_role_inv(inv[role])
-                                            for role in roles)))
+            candidates = list(filter(None,
+                                     (lookup_in_role_inv(inv.get(role, {}))
+                                      for role in roles)))
             if len(candidates) == 1:
                 return _util.item(candidates)
         return annotation
@@ -583,9 +585,12 @@ class ExhibitBackrefs(rst.Directive):
         compute_backrefs(env)
 
         role, name = self.arguments
-        lines = ["* :doc:`{}`".format(docname)
-                 for docname
-                 in sorted(env.exhibit_state.backrefs.get((role, name), []))]
+        lines = ([".. toctree::",
+                  "   :maxdepth: 1",
+                  ""] +
+                 ["   /{}".format(docname)
+                  for docname
+                  in sorted(env.exhibit_state.backrefs.get((role, name), []))])
         node = rst.nodes.Element()
         self.state.nested_parse(ViewList(lines), 0, node)
         return node.children
