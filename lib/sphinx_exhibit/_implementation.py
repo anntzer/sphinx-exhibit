@@ -507,20 +507,20 @@ def ensure_resolved_docrefs(env):
     # Construct the merged inventory.
     inv = {}
     py_domain = "py"
-    # Adapted from InventoryFile.{dump,load_v2}, without the
-    # $-compression/decompression step.
+    # Adapted from InventoryFile.{dump,load_v2}.
     for name, dispname, role, docname, anchor, prio \
             in sorted(env.domains[py_domain].get_objects()):
         uri = env.app.builder.get_target_uri(docname)
         if anchor:
             uri += "#" + anchor
-        if dispname == name:
-            dispname = "-"
-        inv.setdefault(py_domain + ":" + role, {})[name] = (
-            env.config.project, env.config.version, uri, dispname)
+        inv.setdefault(py_domain + ":" + role, {})[name] = name, uri
     if "sphinx.ext.intersphinx" in env.config.extensions:
         for role, role_inv in env.intersphinx_inventory.items():
-            inv[role] = ChainMap(inv.get(role, {}), role_inv)
+            inv[role] = ChainMap(
+                inv.get(role, {}),
+                {name: (name, uri)
+                 for name, (project, version, uri, dispname)
+                 in role_inv.items()})
     for role, role_inv in inv.items():
         suffixes_role_inv = {}
         for k, v in role_inv.items():
@@ -544,20 +544,21 @@ def ensure_resolved_docrefs(env):
             else:
                 roles = [docref.role]
 
-            def lookup_in_role_inv(role_inv):
+            def lookup_by_role(role):
+                role_inv = inv.get(role, {})
                 for lookup in docref.lookups:
                     try:
-                        projname, version, location, dispname = \
-                            role_inv[lookup]
+                        true_lookup, uri = role_inv[lookup]
                     except KeyError:
                         continue
                     return annotation._replace(
-                        docrefs={docref._replace(lookups=(lookup,))},
-                        href=location)
+                        docrefs={
+                            docref._replace(
+                                role=role, lookups=(true_lookup,))},
+                        href=uri)
 
             candidates = list(filter(None,
-                                     (lookup_in_role_inv(inv.get(role, {}))
-                                      for role in roles)))
+                                     (lookup_by_role(role) for role in roles)))
             if len(candidates) == 1:
                 return _util.item(candidates)
         return annotation
