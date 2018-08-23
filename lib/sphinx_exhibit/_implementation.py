@@ -473,14 +473,16 @@ class ExhibitBlock(SourceGetterMixin):
         current_source = self.get_current_source()
         paths = (e_state.docnames[self.get_current_docname()]
                  .artefacts[int(self.arguments[0])])
-        vl = ViewList(
-            [".. code-block:: python", ""]
-            + ["   " + line for line in self.content]
-            + [""]
-            + [".. image:: {}".format(path.relative_to(current_source.parent))
-               for path in paths])
+        lines = ([".. code-block:: python", ""]
+                 + ["   " + line for line in self.content]
+                 + [""])
+        for path in paths:
+            lines.extend([
+                ".. image:: {}"
+                .format(path.relative_to(current_source.parent)),
+                "   :align: center"])
         node = rst.nodes.Element()
-        self.state.nested_parse(vl, 0, node)
+        self.state.nested_parse(ViewList(lines), 0, node)
         return node.children
 
 
@@ -579,12 +581,11 @@ class ExhibitBackrefs(rst.Directive):
         compute_backrefs(env)
 
         role, name = self.arguments
-        vl = ViewList([
-            "* :doc:`{}`".format(docname)
-            for docname
-            in sorted(env.exhibit_state.backrefs.get((role, name), []))])
+        lines = ["* :doc:`{}`".format(docname)
+                 for docname
+                 in sorted(env.exhibit_state.backrefs.get((role, name), []))]
         node = rst.nodes.Element()
-        self.state.nested_parse(vl, 0, node)
+        self.state.nested_parse(ViewList(lines), 0, node)
         return node.children
 
 
