@@ -274,7 +274,7 @@ class Exhibit(SourceGetterMixin):
                     src_path,
                     syntax_style=self.options["syntax-style"],
                     output_style=self.options["output-style"])
-                _util.ensure_contents(dest_path, rst_source)
+                dest_path.write_text(rst_source)
                 # FIXME: Also arrange to delete this file.
                 shutil.copyfile(src_path, dest_path.parent / src_path.name)
                 e_state.docnames[docname] = doc_info = DocInfo()
