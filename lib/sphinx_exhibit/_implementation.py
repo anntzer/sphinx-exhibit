@@ -1,7 +1,6 @@
 # FIXME: Output capture.
 # FIXME: Patch AbstractMovieWriter.saving.
 #
-# FIXME: Backreferences.
 # FIXME: Generate notebook from the rst-generated html.
 #
 # FIXME: Upstream fix to sphinx-jinja.
@@ -36,11 +35,6 @@ from sphinx.environment import BuildEnvironment
 
 from . import _lib2to3_parser, _offset_annotator, _util, __version__
 
-# FIXME: Make these local to exec().
-mpl.backend_bases.FigureCanvasBase.start_event_loop = (
-    lambda self, timeout=0: None)
-mpl.backend_bases.FigureManagerBase.show = (
-    lambda self: None)
 
 plt.switch_backend("agg")
 _log = sphinx.util.logging.getLogger(__name__.split(".")[0])
@@ -352,6 +346,21 @@ class ExhibitSource(SourceGetterMixin):
     }
     has_content = True
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _patch_mpl_interactivity():
+        FigureCanvasBase = mpl.backend_bases.FigureCanvasBase
+        FigureManagerBase = mpl.backend_bases.FigureManagerBase
+        start_event_loop = FigureCanvasBase.start_event_loop
+        show = mpl.backend_bases.FigureManagerBase.show
+        FigureCanvasBase.start_event_loop = lambda self, timeout=0: None
+        FigureManagerBase.show = lambda self: None
+        try:
+            yield
+        finally:
+            FigureCanvasBase.start_event_loop = start_event_loop
+            FigureManagerBase.show = show
+
     def run(self):
         self.options.setdefault("output-style", Style.Native)
 
@@ -460,7 +469,8 @@ class ExhibitSource(SourceGetterMixin):
         # FIXME: runpy + override source_to_code in a custom importer.
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
-        with _util.chdir_cm(Path(self.options["source"]).parent), \
+        with self._patch_mpl_interactivity(), \
+                _util.chdir_cm(Path(self.options["source"]).parent), \
                 warnings.catch_warnings(), \
                 open(os.devnull, "w") as devnull, \
                 contextlib.redirect_stdout(devnull), \
