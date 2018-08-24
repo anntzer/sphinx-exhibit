@@ -160,8 +160,7 @@ def env_before_read_docs(app, env, docnames):
         key=lambda docname: 0 if docname in env.exhibit_state.docnames else 1)
 
 
-def doc_info_from_py_source(
-        src_path, *, syntax_style=Style.Native, output_style=Style.Native):
+def doc_info_from_py_source(src_path, *, syntax_style, output_style):
 
     with src_path.open("rb") as file:
         encoding, _ = tokenize.detect_encoding(file.readline)
@@ -234,7 +233,7 @@ class SourceGetterMixin(rst.Directive):
 class Exhibit(SourceGetterMixin):
     option_spec = {
         "srcdir": rst.directives.unchanged_required,
-        "destdir": rst.directives.unchanged_required,
+        "destdir": rst.directives.unchanged,
         "syntax-style": Style,
         "output-style": Style,
     }
@@ -278,10 +277,14 @@ class Exhibit(SourceGetterMixin):
                 for src_path in src_paths]
 
     def run(self):
-        self.options.setdefault("syntax-style", Style.Native)
-        self.options.setdefault("output-style", Style.Native)
-
         env = self.state.document.settings.env
+
+        self.options.setdefault("destdir", os.curdir)
+        self.options.setdefault(
+            "syntax-style", Style(env.config.exhibit_syntax_style))
+        self.options.setdefault(
+            "output-style", Style(env.config.exhibit_output_style))
+
         e_state = env.exhibit_state
         if e_state.stage is Stage.RstGeneration:
             for src_path, docname in self.get_src_paths_and_docnames():
@@ -371,8 +374,6 @@ class ExhibitSource(SourceGetterMixin):
             FigureManagerBase.show = show
 
     def run(self):
-        self.options.setdefault("output-style", Style.Native)
-
         env = self.state.document.settings.env
         if env.exhibit_state.stage is Stage.ExecutionDone:
             _log.warning(
@@ -456,11 +457,11 @@ class ExhibitSource(SourceGetterMixin):
             nonlocal sg_base_num
             block_idx = next(_block_counter)
             for fig_idx, fignum in enumerate(plt.get_fignums()):
-                if self.options["output-style"] is Style.Native:
+                if doc_info.output_style is Style.Native:
                     dest = Path(
                         env.srcdir,
                         "{}-{}-{}.png".format(env.docname, block_idx, fig_idx))
-                elif self.options["output-style"] is Style.SG:
+                elif doc_info.output_style is Style.SG:
                     dir_path = (env.srcdir
                                 / self.get_current_source().parent
                                 / "images")
@@ -616,18 +617,26 @@ def compute_backrefs(env):
 
 class ExhibitBackrefs(rst.Directive):
     required_arguments = 2
+    option_spec = {
+        "title": rst.directives.unchanged,
+    }
 
     def run(self):
         env = self.state.document.settings.env
+        # FIXME :/ But *compute_backrefs* needs to run after the API docs have
+        # been processed...
         compute_backrefs(env)
 
         role, name = self.arguments
-        lines = ([".. toctree::",
+        backrefs = sorted(env.exhibit_state.backrefs.get((role, name), []))
+        lines = ([self.options.get("title", ""),
+                  "",
+                  ".. toctree::",
                   "   :maxdepth: 1",
                   ""] +
-                 ["   /{}".format(docname)
-                  for docname
-                  in sorted(env.exhibit_state.backrefs.get((role, name), []))])
+                 ["   /{}".format(docname) for docname in backrefs]
+                 if backrefs
+                 else [])
         node = rst.nodes.Element()
         self.state.nested_parse(ViewList(lines), 0, node)
         return node.children
@@ -711,6 +720,9 @@ def embed_annotations(app, docname):
 
 
 def setup(app):
+    # These affect rst generation but don't invalidate previous parses.
+    app.add_config_value("exhibit_syntax_style", "native", "")
+    app.add_config_value("exhibit_output_style", "native", "")
     app.connect("builder-inited", builder_inited)
     app.connect("env-before-read-docs", env_before_read_docs)
     app.connect("env-merge-info", env_merge_info)
