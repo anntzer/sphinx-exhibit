@@ -641,7 +641,9 @@ def build_finished(app, exc):
     if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
         return
     ensure_resolved_docrefs(app.env)
-    for docname in app.env.exhibit_state.docnames:
+    for docname in sphinx.util.status_iterator(
+            app.env.exhibit_state.docnames, "embedding links... ",
+            length=len(app.env.exhibit_state.docnames)):
         embed_annotations(app, docname)
 
 
