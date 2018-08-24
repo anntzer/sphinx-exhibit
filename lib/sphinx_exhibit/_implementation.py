@@ -627,7 +627,13 @@ class ExhibitBackrefs(rst.Directive):
     def run(self):
         role, name = self.arguments
         title = self.options.get("title", "")
-        return [exhibit_backrefs(role=role, name=name, title=title)]
+        # Parse the title now that this can easily be done, and remove it later
+        # if it turns out to be unneeded.
+        node = rst.nodes.Element()
+        self.state.nested_parse(ViewList([title]), 0, node)
+        return (node.children
+                + [exhibit_backrefs(role=role, name=name,
+                                    title_node_count=len(node.children))])
 
 
 class TransformExhibitBackrefs(SphinxTransform):
@@ -640,9 +646,6 @@ class TransformExhibitBackrefs(SphinxTransform):
         class ExhibitBackrefsVisitor(rst.nodes.SparseNodeVisitor):
             def visit_exhibit_backrefs(_, node):
                 # FIXME: Directly build the docutils tree.  (Tried...)
-                # FIXME: This is going to run into issues when the rawsource or
-                # title contains sphinx-specific markup...  For the title we
-                # can parse it normally and drop it from the tree if needed.
                 backrefs = sorted(
                     self.env.exhibit_state.backrefs.get(
                         (node.attributes["role"], node.attributes["name"]),
@@ -660,13 +663,16 @@ class TransformExhibitBackrefs(SphinxTransform):
                                       .format(idx, title))
                         hrefs.append("__ {}\n".format(html_fname))
                     new = docutils.core.publish_doctree(
-                        node.attributes["title"] + "\n\n" +
                         "".join(bullets) + "\n" +
                         "".join(titles) + "\n" +
                         "".join(hrefs))
                     node.replace_self(new.children)
                 else:
-                    node.replace_self([])
+                    title_node_count = node.attributes["title_node_count"]
+                    remove_from_idx = (
+                        node.parent.index(node) - title_node_count)
+                    for idx in range(title_node_count + 1):
+                        node.parent.pop(remove_from_idx)
 
         self.document.walkabout(ExhibitBackrefsVisitor(self.document))
 
