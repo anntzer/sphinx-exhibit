@@ -44,8 +44,8 @@ _deletion_notice = """\
 """
 
 
-class Stage(Enum):  # backcompat: can use app.phase in sphinx>=1.8.
-    RstGeneration, RstGenerated = range(2)
+class Stage(Enum):
+    RstGeneration, ExampleExecution, ExecutionDone = range(3)
 
 
 class Style(Enum):
@@ -102,9 +102,9 @@ def builder_inited(app):
             docutils.core.publish_doctree(
                 contents, source_path=path, settings_overrides={"env": env})
     app.env.exhibit_prev_state = \
-        getattr(app.env, "exhibit_state", State(Stage.RstGenerated, {}, {}))
+        getattr(app.env, "exhibit_state", State(None, {}, {}))
     app.env.exhibit_state = \
-        env.exhibit_state._replace(stage=Stage.RstGenerated)
+        env.exhibit_state._replace(stage=Stage.ExampleExecution)
     rst.directives.register_directive("exhibit-skip", ExhibitSkip)
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
@@ -296,7 +296,7 @@ class Exhibit(SourceGetterMixin):
                 shutil.copyfile(src_path, dest_path.parent / src_path.name)
                 e_state.docnames[docname] = doc_info
             return []
-        elif e_state.stage is Stage.RstGenerated:
+        else:  # Read stage, either ExampleExecution or ExecutionDone.
             cur_dir = self.get_current_source().parent
             lines = ([".. toctree::",
                       "   :maxdepth: 1",
@@ -306,8 +306,6 @@ class Exhibit(SourceGetterMixin):
             node = rst.nodes.Element()
             self.state.nested_parse(ViewList(lines), 0, node)
             return node.children
-        else:
-            assert False
 
 
 class ExhibitSkip(SourceGetterMixin):
@@ -376,6 +374,10 @@ class ExhibitSource(SourceGetterMixin):
         self.options.setdefault("output-style", Style.Native)
 
         env = self.state.document.settings.env
+        if env.exhibit_state.stage is Stage.ExecutionDone:
+            _log.warning(
+                "Handling %s after docrefs have already been resolved.")
+
         doc_info = env.exhibit_state.docnames[env.docname]
         doc_info.artefacts = [[] for _ in doc_info.capture_after_lines]
         if doc_info.skip or doc_info.output_style is Style.None_:
@@ -496,7 +498,7 @@ class ExhibitSource(SourceGetterMixin):
                      "__name__": "__main__"}))()
             # FIXME: Report error.
             except (Exception, SystemExit) as e:
-                _log.warning(e)
+                _log.warning("%s", e)
 
         return []
 
@@ -530,6 +532,7 @@ def ensure_resolved_docrefs(env):
     After this step, resolved annotations contain a single DocRef which
     contains a single lookup.
     """
+    env.exhibit_state = env.exhibit_state._replace(stage=Stage.ExecutionDone)
 
     # Construct the merged inventory.
     inv = {}
@@ -600,6 +603,7 @@ def ensure_resolved_docrefs(env):
 
 @functools.lru_cache()
 def compute_backrefs(env):
+    ensure_resolved_docrefs(env)
     for docname, doc_info in env.exhibit_state.docnames.items():
         for annotation in doc_info.annotations.values():
             if annotation.href:  # Resolved, so single values below.
@@ -614,9 +618,7 @@ class ExhibitBackrefs(rst.Directive):
     required_arguments = 2
 
     def run(self):
-        # FIXME: Add warning if we re-run into ExhibitSource later.
         env = self.state.document.settings.env
-        ensure_resolved_docrefs(env)
         compute_backrefs(env)
 
         role, name = self.arguments
