@@ -66,6 +66,9 @@ State = namedtuple("State", "stage docnames backrefs")
 class DocInfo:
     def __init__(self):
         self.code_line_idxs = None
+        self.capture_after_lines = []
+        self.output_style = None
+        self.rst = None
         self.skip = False
         self.artefacts = []
         self.annotations = {}
@@ -152,7 +155,7 @@ def env_before_read_docs(app, env, docnames):
         key=lambda docname: 0 if docname in env.exhibit_state.docnames else 1)
 
 
-def process_py_source(
+def doc_info_from_py_source(
         src_path, *, syntax_style=Style.Native, output_style=Style.Native):
 
     with src_path.open("rb") as file:
@@ -205,14 +208,16 @@ def process_py_source(
             assert False
 
     source_block = (".. exhibit-source::\n" +
-                    "   :source: {}\n".format(src_path) +
-                    "   :capture-after-lines: {}\n".format(
-                      " ".join(map(str, capture_after_lines))) +
-                    "   :output-style: {}\n".format(output_style.value))
+                    "   :source: {}\n".format(src_path))
     text_blocks.insert(insert_source_block_at or 0, source_block)
 
     rst_source = "\n\n".join(text_blocks)
-    return rst_source, code_line_idxs
+    doc_info = DocInfo()
+    doc_info.code_line_idxs = code_line_idxs
+    doc_info.capture_after_lines = capture_after_lines
+    doc_info.output_style = output_style
+    doc_info.rst = rst_source
+    return doc_info
 
 
 class SourceGetterMixin(rst.Directive):
@@ -277,15 +282,14 @@ class Exhibit(SourceGetterMixin):
             for src_path, docname in self.get_src_paths_and_docnames():
                 dest_path = Path(env.doc2path(docname))
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
-                rst_source, code_line_idxs = process_py_source(
+                doc_info = doc_info_from_py_source(
                     src_path,
                     syntax_style=self.options["syntax-style"],
                     output_style=self.options["output-style"])
-                dest_path.write_text(rst_source)
+                dest_path.write_text(doc_info.rst)
                 # FIXME: Also arrange to delete this file.
                 shutil.copyfile(src_path, dest_path.parent / src_path.name)
-                e_state.docnames[docname] = doc_info = DocInfo()
-                doc_info.code_line_idxs = code_line_idxs
+                e_state.docnames[docname] = doc_info
             return []
         elif e_state.stage is Stage.RstGenerated:
             cur_dir = self.get_current_source().parent
@@ -345,9 +349,6 @@ def get_docref(obj, source_name, parent=None):
 class ExhibitSource(SourceGetterMixin):
     option_spec = {
         "source": rst.directives.unchanged_required,
-        "capture-after-lines":
-            lambda s: rst.directives.positive_int_list(s) if s else [],
-        "output-style": Style,
     }
     has_content = True
 
@@ -356,8 +357,8 @@ class ExhibitSource(SourceGetterMixin):
 
         env = self.state.document.settings.env
         doc_info = env.exhibit_state.docnames[env.docname]
-        doc_info.artefacts = [[] for _ in self.options["capture-after-lines"]]
-        if doc_info.skip or self.options["output-style"] is Style.None_:
+        doc_info.artefacts = [[] for _ in doc_info.capture_after_lines]
+        if doc_info.skip or doc_info.output_style is Style.None_:
             return []
 
         mod = _offset_annotator.parse(
@@ -399,7 +400,7 @@ class ExhibitSource(SourceGetterMixin):
 
         mod = Transformer().visit(mod)
 
-        for lineno in self.options["capture-after-lines"]:
+        for lineno in doc_info.capture_after_lines:
             inserted = ast.fix_missing_locations(
                 ast.Expr(
                     ast.Call(
