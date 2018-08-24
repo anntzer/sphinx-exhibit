@@ -67,7 +67,7 @@ class DocInfo:
         self.artefacts = []
         self.annotations = {}
 
-    def merge(self, other):
+    def merge(self, other):  # For reloading old info and for parallel builds.
         assert not (self.artefacts and other.artefacts
                     or self.annotations and other.annotations)
         self.artefacts = self.artefacts or other.artefacts
@@ -101,8 +101,10 @@ def builder_inited(app):
             # FIXME: Only publish the topmost block containing the exhibit.
             docutils.core.publish_doctree(
                 contents, source_path=path, settings_overrides={"env": env})
-    app.env.exhibit_state = State(
-        Stage.RstGenerated, env.exhibit_state.docnames, {})
+    app.env.exhibit_prev_state = \
+        getattr(app.env, "exhibit_state", State(Stage.RstGenerated, {}, {}))
+    app.env.exhibit_state = \
+        env.exhibit_state._replace(stage=Stage.RstGenerated)
     rst.directives.register_directive("exhibit-skip", ExhibitSkip)
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
@@ -144,6 +146,15 @@ def split_text_and_code_blocks(src):
 
 
 def env_before_read_docs(app, env, docnames):
+    for docname, doc_info in env.exhibit_state.docnames.items():
+        prev_info = env.exhibit_prev_state.docnames.get(docname)
+        if (prev_info
+                and doc_info.rst == prev_info.rst
+                and all(Path(app.env.srcdir, path).exists()
+                        for block in prev_info.artefacts
+                        for path in block)):
+            doc_info.merge(prev_info)
+            docnames.remove(docname)
     docnames[:] = sorted(
         docnames,
         key=lambda docname: 0 if docname in env.exhibit_state.docnames else 1)
