@@ -32,6 +32,7 @@ from matplotlib import pyplot as plt
 import sphinx
 from sphinx.builders.dummy import DummyBuilder
 from sphinx.environment import BuildEnvironment
+from sphinx.transforms import SphinxTransform
 
 from . import _lib2to3_parser, _offset_annotator, _util, __version__
 
@@ -109,6 +110,8 @@ def builder_inited(app):
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
     rst.directives.register_directive("exhibit-backrefs", ExhibitBackrefs)
+    app.add_node(exhibit_backrefs)
+    app.add_post_transform(TransformExhibitBackrefs)
 
 
 def split_text_and_code_blocks(src):
@@ -155,9 +158,6 @@ def env_before_read_docs(app, env, docnames):
                         for path in block)):
             doc_info.merge(prev_info)
             docnames.remove(docname)
-    docnames[:] = sorted(
-        docnames,
-        key=lambda docname: 0 if docname in env.exhibit_state.docnames else 1)
 
 
 def doc_info_from_py_source(src_path, *, syntax_style, output_style):
@@ -249,10 +249,10 @@ class Exhibit(SourceGetterMixin):
                 excluded = sorted(src_dir.glob(line[1:]))
                 # Log just once.
                 if env.exhibit_state.stage is Stage.RstGeneration:
-                    _log.info("expanding (for removal) %s (in %s) to %s.",
-                              line, src_dir.relative_to(env.srcdir),
-                              " ".join(str(path.relative_to(src_dir))
-                                       for path in excluded))
+                    _log.debug("expanding (for removal) %s (in %s) to %s.",
+                               line, src_dir.relative_to(env.srcdir),
+                               " ".join(str(path.relative_to(src_dir))
+                                        for path in excluded))
                 for path in excluded:
                     try:
                         src_paths.remove(path)
@@ -264,10 +264,10 @@ class Exhibit(SourceGetterMixin):
                 added = sorted(src_dir.glob(line))
                 # Log just once.
                 if env.exhibit_state.stage is Stage.RstGeneration:
-                    _log.info("expanding (for addition) %s (in %s) to %s.",
-                              line, src_dir.relative_to(env.srcdir),
-                              " ".join(str(path.relative_to(src_dir))
-                                       for path in added))
+                    _log.debug("expanding (for addition) %s (in %s) to %s.",
+                               line, src_dir.relative_to(env.srcdir),
+                               " ".join(str(path.relative_to(src_dir))
+                                        for path in added))
                 src_paths.extend(added)
         return [(src_path,
                  Path(cur_dir,
@@ -499,7 +499,7 @@ class ExhibitSource(SourceGetterMixin):
                      "__name__": "__main__"}))()
             # FIXME: Report error.
             except (Exception, SystemExit) as e:
-                _log.warning("%s", e)
+                _log.warning("%s raised %s: %s", env.docname, type(e), e)
 
         return []
 
@@ -526,7 +526,7 @@ class ExhibitBlock(SourceGetterMixin):
 
 
 @functools.lru_cache()
-def ensure_resolved_docrefs(env):
+def resolve_docrefs(env):
     """
     Resolve the runtime annotations.
 
@@ -604,7 +604,6 @@ def ensure_resolved_docrefs(env):
 
 @functools.lru_cache()
 def compute_backrefs(env):
-    ensure_resolved_docrefs(env)
     for docname, doc_info in env.exhibit_state.docnames.items():
         for annotation in doc_info.annotations.values():
             if annotation.href:  # Resolved, so single values below.
@@ -615,6 +614,10 @@ def compute_backrefs(env):
                  .add(docname))
 
 
+class exhibit_backrefs(rst.nodes.Element):
+    pass
+
+
 class ExhibitBackrefs(rst.Directive):
     required_arguments = 2
     option_spec = {
@@ -622,24 +625,50 @@ class ExhibitBackrefs(rst.Directive):
     }
 
     def run(self):
-        env = self.state.document.settings.env
-        # FIXME :/ But *compute_backrefs* needs to run after the API docs have
-        # been processed...
-        compute_backrefs(env)
-
         role, name = self.arguments
-        backrefs = sorted(env.exhibit_state.backrefs.get((role, name), []))
-        lines = ([self.options.get("title", ""),
-                  "",
-                  ".. toctree::",
-                  "   :maxdepth: 1",
-                  ""] +
-                 ["   /{}".format(docname) for docname in backrefs]
-                 if backrefs
-                 else [])
-        node = rst.nodes.Element()
-        self.state.nested_parse(ViewList(lines), 0, node)
-        return node.children
+        title = self.options.get("title", "")
+        return [exhibit_backrefs(role=role, name=name, title=title)]
+
+
+class TransformExhibitBackrefs(SphinxTransform):
+    default_priority = 400
+
+    def apply(self):
+        resolve_docrefs(self.env)
+        compute_backrefs(self.env)
+
+        class ExhibitBackrefsVisitor(rst.nodes.SparseNodeVisitor):
+            def visit_exhibit_backrefs(_, node):
+                # FIXME: Directly build the docutils tree.  (Tried...)
+                # FIXME: This is going to run into issues when the rawsource or
+                # title contains sphinx-specific markup...  For the title we
+                # can parse it normally and drop it from the tree if needed.
+                backrefs = sorted(
+                    self.env.exhibit_state.backrefs.get(
+                        (node.attributes["role"], node.attributes["name"]),
+                        []))
+                if backrefs:
+                    bullets = []
+                    titles = []
+                    hrefs = []
+                    for idx, docname in enumerate(backrefs):
+                        title = self.env.titles[docname][0].rawsource
+                        html_fname = ("../" * self.env.docname.count("/")
+                                    + docname + self.app.builder.out_suffix)
+                        bullets.append("- |id{}|__\n".format(idx))
+                        titles.append(".. |id{}| replace:: {}\n"
+                                      .format(idx, title))
+                        hrefs.append("__ {}\n".format(html_fname))
+                    new = docutils.core.publish_doctree(
+                        node.attributes["title"] + "\n\n" +
+                        "".join(bullets) + "\n" +
+                        "".join(titles) + "\n" +
+                        "".join(hrefs))
+                    node.replace_self(new.children)
+                else:
+                    node.replace_self([])
+
+        self.document.walkabout(ExhibitBackrefsVisitor(self.document))
 
 
 def env_merge_info(app, env, docnames, other):
@@ -651,7 +680,6 @@ def env_merge_info(app, env, docnames, other):
 def build_finished(app, exc):
     if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
         return
-    ensure_resolved_docrefs(app.env)
     for docname in sphinx.util.status_iterator(
             app.env.exhibit_state.docnames, "embedding links... ",
             length=len(app.env.exhibit_state.docnames)):
