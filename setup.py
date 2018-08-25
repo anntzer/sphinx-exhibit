@@ -25,6 +25,7 @@ setup(
     install_requires=[
         "lxml",
         "matplotlib",
+        "nbformat",
         "sphinx",
     ],
     entry_points={

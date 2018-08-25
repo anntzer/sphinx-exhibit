@@ -1,8 +1,6 @@
 # FIXME: Output capture.
 # FIXME: Patch AbstractMovieWriter.saving.
 #
-# FIXME: Generate notebook from the rst-generated html.
-#
 # FIXME: Upstream fix to sphinx-jinja.
 
 import ast
@@ -11,6 +9,7 @@ import contextlib
 import copy
 from enum import Enum
 import functools
+import html
 import itertools
 from lib2to3 import pygram
 import os
@@ -29,6 +28,7 @@ import lxml.html
 import matplotlib as mpl
 import matplotlib.testing.decorators
 from matplotlib import pyplot as plt
+import nbformat.v4
 import sphinx
 from sphinx.builders.dummy import DummyBuilder
 from sphinx.environment import BuildEnvironment
@@ -60,7 +60,8 @@ State = namedtuple("State", "stage docnames backrefs")
 
 class DocInfo:
     def __init__(self):
-        self.code_line_idxs = None
+        self.src_path = None
+        self.code_line_ranges = None
         self.capture_after_lines = []
         self.output_style = None
         self.rst = None
@@ -185,15 +186,29 @@ def doc_info_from_py_source(src_path, *, syntax_style, output_style):
     else:
         assert False
 
-    text_blocks = [_deletion_notice]
+    text_blocks = [
+        _deletion_notice,
+        ".. raw:: html\n\n"
+        "   <p style='text-align:right'><a href='{}' download>"
+           "Download this example as Python source.</a></p>\n"
+        "   <p style='text-align:right'><a href='{}' download>"
+           "Download this example as Jupyter notebook.</a></p>\n"
+        "   <div class='sphinx-exhibit-blocks-start'/>"
+        .format(html.escape(src_path.name),
+                html.escape(src_path.with_suffix(".ipynb").name)),
+    ]
     insert_source_block_at = None
 
-    code_line_idxs = []
+    code_line_ranges = []
     capture_after_lines = []
     block_counter = itertools.count()
     for tp, string, lineno in text_and_code_blocks:
         if tp == "text":
-            text_blocks.append(string)
+            text_blocks.extend([
+                string,
+                ".. raw:: html\n\n"
+                "   <div class='sphinx-exhibit-block-sep' type='text'/>",
+            ])
             if insert_source_block_at is None:
                 insert_source_block_at = len(text_blocks)
         elif tp == "code":
@@ -203,11 +218,14 @@ def doc_info_from_py_source(src_path, *, syntax_style, output_style):
             if insert_source_block_at is None:
                 insert_source_block_at = len(text_blocks)
             n_lines = string.count("\n")
-            code_line_idxs.extend(range(lineno, lineno + n_lines))
-            capture_after_lines.append(code_line_idxs[-1])
-            text_blocks.append(".. exhibit-block:: {}"
-                               .format(next(block_counter)))
-            text_blocks.append(textwrap.indent(string, "   "))
+            code_line_ranges.append(range(lineno, lineno + n_lines))
+            capture_after_lines.append(lineno + n_lines - 1)
+            text_blocks.extend([
+                ".. exhibit-block:: {}".format(next(block_counter)),
+                textwrap.indent(string, "   "),
+                ".. raw:: html\n\n"
+                "   <div class='sphinx-exhibit-block-sep' type='code'/>",
+            ])
         else:
             assert False
 
@@ -217,7 +235,8 @@ def doc_info_from_py_source(src_path, *, syntax_style, output_style):
 
     rst_source = "\n\n".join(text_blocks)
     doc_info = DocInfo()
-    doc_info.code_line_idxs = code_line_idxs
+    doc_info.src_path = src_path
+    doc_info.code_line_ranges = code_line_ranges
     doc_info.capture_after_lines = capture_after_lines
     doc_info.output_style = output_style
     doc_info.rst = rst_source
@@ -295,6 +314,8 @@ class Exhibit(SourceGetterMixin):
                     syntax_style=self.options["syntax-style"],
                     output_style=self.options["output-style"])
                 dest_path.write_text(doc_info.rst)
+                # NOTE: We don't actually need this source; it is only copied
+                # for compat with s-g and its use by the .. plot:: directive.
                 # FIXME: Also arrange to delete this file.
                 shutil.copyfile(src_path, dest_path.parent / src_path.name)
                 e_state.docnames[docname] = doc_info
@@ -302,7 +323,7 @@ class Exhibit(SourceGetterMixin):
         else:  # Read stage, either ExampleExecution or ExecutionDone.
             cur_dir = self.get_current_source().parent
             lines = ([".. toctree::",
-                      "   :maxdepth: 1",
+                      "   :titlesonly:",
                       ""] +
                      ["   /{}".format(docname)
                       for _, docname in self.get_src_paths_and_docnames()])
@@ -385,7 +406,9 @@ class ExhibitSource(SourceGetterMixin):
             return []
 
         mod = _offset_annotator.parse(
-            self.options["source"], doc_info.code_line_idxs)
+            self.options["source"],
+            [idx for code_line_range in doc_info.code_line_ranges
+             for idx in code_line_range])
 
         # Rewrite (Load context only):
         # - foo
@@ -517,9 +540,18 @@ class ExhibitBlock(SourceGetterMixin):
                  [""])
         for path in doc_info.artefacts[int(self.arguments[0])]:
             lines.extend([
-                ".. image:: {}"
-                .format(path.relative_to(current_source.parent)),
-                "   :align: center"])
+                ".. raw:: html",
+                "",
+                "   <div class='sphinx-exhibit-nbskip'>",
+                "",
+                ".. image:: {}".format(
+                    path.relative_to(current_source.parent)),
+                "   :align: center",
+                "",
+                ".. raw:: html",
+                "",
+                "   </div>",
+            ])
         node = rst.nodes.Element()
         self.state.nested_parse(ViewList(lines), 0, node)
         return node.children
@@ -686,10 +718,95 @@ def env_merge_info(app, env, docnames, other):
 def build_finished(app, exc):
     if exc or app.builder.name != "html":  # s-g also whitelists "readthedocs"?
         return
-    for docname in sphinx.util.status_iterator(
-            app.env.exhibit_state.docnames, "embedding links... ",
-            length=len(app.env.exhibit_state.docnames)):
+    docnames = app.env.exhibit_state.docnames
+    iter_docnames = functools.partial(sphinx.util.status_iterator, docnames,
+                                      length=len(docnames))
+    for docname in iter_docnames("copying exhibit sources and notebooks... "):
+        copy_py_source(app, docname)
+        generate_notebook(app, docname)
+    for docname in iter_docnames("embedding links... "):
         embed_annotations(app, docname)
+
+
+def copy_py_source(app, docname):
+    shutil.copyfile(
+        app.env.exhibit_state.docnames[docname].src_path,
+        Path(app.builder.get_outfilename(docname)).with_suffix(".py"))
+
+
+def generate_notebook(app, docname):
+    doc_info = app.env.exhibit_state.docnames[docname]
+    source_lines = [
+        None, *doc_info.src_path.read_text().splitlines(keepends=True)]
+    code_blocks = ("".join(source_lines[idx] for idx in code_block)
+                   for code_block in doc_info.code_line_ranges)
+    cells = []
+
+    html_path = Path(app.builder.get_outfilename(docname))
+    root = lxml.html.parse(str(html_path)).getroot()
+    for elem in root.findall(".//a[@class='headerlink']"):
+        elem.getparent().remove(elem)
+    for elem in root.findall(".//div[@class='sphinx-exhibit-nbskip']"):
+        elem.getparent().remove(elem)
+
+    elem, = root.findall(".//div[@class='sphinx-exhibit-blocks-start']")
+    assert elem.tail is None
+    parent = elem.getparent()
+    parent[:parent.index(elem) + 1] = []
+    elem = parent
+    while True:
+        parent = elem.getparent()
+        if parent is None:
+            break
+        parent[:parent.index(elem)] = []
+        elem = parent
+
+    while True:
+        elem = root.find(".//div[@class='sphinx-exhibit-block-sep']")
+        if elem is None:
+            break
+        assert elem.tail is None
+        etype = elem.attrib["type"]
+        remainder = copy.deepcopy(root)
+        # In the block, delete everything from the sep.
+        parent = elem.getparent()
+        parent[parent.index(elem):] = []
+        elem = parent
+        while True:
+            parent = elem.getparent()
+            if parent is None:
+                break
+            parent[parent.index(elem) + 1:] = []
+            elem = parent
+        if etype == "text":
+            rendered = lxml.etree.tostring(root).decode("utf-8")
+            # Remove blank lines, as they are insignificant and cause md to
+            # treat following indented lines as blocks.
+            rendered = "\n".join(
+                line for line in rendered.splitlines() if line.strip())
+            cells.append(nbformat.v4.new_markdown_cell(rendered))
+        elif etype == "code":
+            # Remove trailing newlines, as nbformat renders even a single final
+            # newline as a blank line.
+            cells.append(nbformat.v4.new_code_cell(
+                next(code_blocks).rstrip("\n")))
+        # In the remainder tree, delete everything up to and including the sep.
+        root = remainder
+        # The same elem as above, but in the remainder tree.
+        elem = root.find(".//div[@class='sphinx-exhibit-block-sep']")
+        parent = elem.getparent()
+        parent[:parent.index(elem) + 1] = []
+        elem = parent
+        while True:
+            parent = elem.getparent()
+            if parent is None:
+                break
+            parent[:parent.index(elem)] = []
+            elem = parent
+
+    notebook = nbformat.v4.new_notebook(cells=cells)
+    with html_path.with_suffix(".ipynb").open("w") as file:
+        nbformat.write(notebook, file)
 
 
 def embed_annotations(app, docname):
@@ -703,8 +820,7 @@ def embed_annotations(app, docname):
         return href
 
     tree = lxml.html.parse(str(html_path))
-    root = tree.getroot()
-    elems = root.findall(
+    elems = tree.findall(
         ".//div[@class='highlight-python notranslate']/div/pre")
     offset = 0
     offset_to_elem = {}
