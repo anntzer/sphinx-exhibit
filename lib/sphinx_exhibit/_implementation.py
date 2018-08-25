@@ -172,7 +172,7 @@ def doc_info_from_py_source(src_path, *, syntax_style, output_style):
     elif syntax_style is Style.SG:
         from sphinx_gallery.py_source_parser import (
             split_code_and_text_blocks as sg_split_text_and_code_blocks)
-        _, text_and_code_blocks = sg_split_text_and_code_blocks(src_path)
+        _, text_and_code_blocks = sg_split_text_and_code_blocks(str(src_path))
         # Strip extra newlines at the beginning and the end, as above.  Note
         # that s-g provides a correct lineno including the beginning newlines,
         # so it must be fixed.
@@ -317,7 +317,8 @@ class Exhibit(SourceGetterMixin):
                 # NOTE: We don't actually need this source; it is only copied
                 # for compat with s-g and its use by the .. plot:: directive.
                 # FIXME: Also arrange to delete this file.
-                shutil.copyfile(src_path, dest_path.parent / src_path.name)
+                shutil.copyfile(str(src_path),
+                                str(dest_path.parent / src_path.name))
                 e_state.docnames[docname] = doc_info
             return []
         else:  # Read stage, either ExampleExecution or ExecutionDone.
@@ -496,7 +497,7 @@ class ExhibitSource(SourceGetterMixin):
                     assert False
                 doc_info.artefacts[block_idx].append(
                     dest.relative_to(env.srcdir))
-                plt.figure(fignum).savefig(dest)
+                plt.figure(fignum).savefig(str(dest))
             block_idx += 1
             sg_base_num += len(plt.get_fignums())
             # FIXME: Make this configurable?
@@ -533,7 +534,8 @@ class ExhibitSource(SourceGetterMixin):
                      "__file__": self.options["source"],
                      "__name__": "__main__"}))()
             except (Exception, SystemExit) as e:
-                _log.warning("%s raised %s: %s", env.docname, type(e), e)
+                _log.warning("%s raised %s: %s",
+                             env.docname, type(e).__name__, e)
 
         doc_info.outputs = stream.get_contents()
 
@@ -756,8 +758,8 @@ def build_finished(app, exc):
 
 def copy_py_source(app, docname):
     shutil.copyfile(
-        app.env.exhibit_state.docnames[docname].src_path,
-        Path(app.builder.get_outfilename(docname)).with_suffix(".py"))
+        str(app.env.exhibit_state.docnames[docname].src_path),
+        str(Path(app.builder.get_outfilename(docname)).with_suffix(".py")))
 
 
 def generate_notebook(app, docname):

@@ -22,11 +22,13 @@ setup(
         "local_scheme": "node-and-date",
         "write_to": "lib/sphinx_exhibit/_version.py",
     },
+    python_requires=">=3.5",
     install_requires=[
-        "lxml",
-        "matplotlib",
-        "nbformat",
-        "sphinx",
+        "lxml>=3.5",  # First to support Py3.5.
+        "matplotlib>=2.0",  # Changed mpl.testing.decorators.cleanup.
+        "nbformat>=4.0",
+        "sphinx>=1.7",  # BuildEnvironment.prepare_settings.
+        # Depends on nose on "old-enough" matplotlibs.
     ],
     entry_points={
         "console_scripts": [],

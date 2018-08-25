@@ -11,7 +11,7 @@ def item(seq):
 def chdir_cm(path):
     pwd = os.getcwd()
     try:
-        os.chdir(path)
+        os.chdir(str(path))
         yield
     finally:
         os.chdir(pwd)
