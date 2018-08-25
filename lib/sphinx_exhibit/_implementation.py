@@ -1,4 +1,3 @@
-# FIXME: Output capture.
 # FIXME: Patch AbstractMovieWriter.saving.
 #
 # FIXME: Upstream fix to sphinx-jinja.
@@ -66,6 +65,7 @@ class DocInfo:
         self.output_style = None
         self.rst = None
         self.skip = False
+        self.outputs = []
         self.artefacts = []
         self.annotations = {}
 
@@ -402,6 +402,7 @@ class ExhibitSource(SourceGetterMixin):
 
         doc_info = env.exhibit_state.docnames[env.docname]
         doc_info.artefacts = [[] for _ in doc_info.capture_after_lines]
+        doc_info.outputs = ["" for _ in doc_info.capture_after_lines]
         if doc_info.skip or doc_info.output_style is Style.None_:
             return []
 
@@ -474,11 +475,10 @@ class ExhibitSource(SourceGetterMixin):
                  .docrefs.add(docref))
             return attr
 
+        block_idx = 0
         sg_base_num = 0
-        def sphinx_exhibit_export(
-                *, _block_counter=itertools.count()):
-            nonlocal sg_base_num
-            block_idx = next(_block_counter)
+        def sphinx_exhibit_export():
+            nonlocal block_idx, sg_base_num
             for fig_idx, fignum in enumerate(plt.get_fignums()):
                 if doc_info.output_style is Style.Native:
                     dest = Path(
@@ -497,9 +497,22 @@ class ExhibitSource(SourceGetterMixin):
                 doc_info.artefacts[block_idx].append(
                     dest.relative_to(env.srcdir))
                 plt.figure(fignum).savefig(dest)
+            block_idx += 1
             sg_base_num += len(plt.get_fignums())
             # FIXME: Make this configurable?
             plt.close("all")
+
+        class Stream:
+            def __init__(self):
+                self._writes = [[] for _ in range(len(doc_info.outputs))]
+
+            def write(self, s):
+                self._writes[block_idx].append(s)
+
+            def get_contents(self):
+                return ["".join(block) for block in self._writes]
+
+        stream = Stream()
 
         # FIXME: chdir is only for s-g compatibility.
         # FIXME: Also patch sys.argv.
@@ -509,9 +522,8 @@ class ExhibitSource(SourceGetterMixin):
         with self._patch_mpl_interactivity(), \
                 _util.chdir_cm(Path(self.options["source"]).parent), \
                 warnings.catch_warnings(), \
-                open(os.devnull, "w") as devnull, \
-                contextlib.redirect_stdout(devnull), \
-                contextlib.redirect_stderr(devnull):
+                contextlib.redirect_stdout(stream), \
+                contextlib.redirect_stderr(stream):
             try:
                 mpl.testing.decorators.cleanup("default")(lambda: exec(
                     code,
@@ -520,9 +532,10 @@ class ExhibitSource(SourceGetterMixin):
                      export_func_name: sphinx_exhibit_export,
                      "__file__": self.options["source"],
                      "__name__": "__main__"}))()
-            # FIXME: Report error.
             except (Exception, SystemExit) as e:
                 _log.warning("%s raised %s: %s", env.docname, type(e), e)
+
+        doc_info.outputs = stream.get_contents()
 
         return []
 
@@ -538,20 +551,33 @@ class ExhibitBlock(SourceGetterMixin):
         lines = ([".. code-block:: python", ""] +
                  ["   " + line for line in self.content] +
                  [""])
-        for path in doc_info.artefacts[int(self.arguments[0])]:
+        block_idx = int(self.arguments[0])
+        lines.extend([
+            ".. raw:: html",
+            "",
+            "   <div class='sphinx-exhibit-nbskip'>",
+            "",
+        ])
+        if doc_info.outputs[block_idx]:
             lines.extend([
-                ".. raw:: html",
-                "",
-                "   <div class='sphinx-exhibit-nbskip'>",
-                "",
+                ".. code-block:: none",
+                ""] + [
+                "   " + line
+                for line in doc_info.outputs[block_idx].splitlines()
+            ])
+        for path in doc_info.artefacts[block_idx]:
+            lines.extend([
                 ".. image:: {}".format(
                     path.relative_to(current_source.parent)),
                 "   :align: center",
                 "",
-                ".. raw:: html",
-                "",
-                "   </div>",
             ])
+        lines.extend([
+            ".. raw:: html",
+            "",
+            "   </div>",
+            "",
+        ])
         node = rst.nodes.Element()
         self.state.nested_parse(ViewList(lines), 0, node)
         return node.children
