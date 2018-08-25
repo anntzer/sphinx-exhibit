@@ -875,7 +875,9 @@ def embed_annotations(app, docname):
                 elem = offset_to_elem[offset - 1]
                 expected_prefix = "@"
             except KeyError:
-                _log.warning(  # Can happen with composite decorators...
+                # Can happen with composite decorators... upgrade to warning
+                # once that case is fixed.
+                _log.info(
                     "In {}, dropping annotation {} not matching highlighting "
                     "at offset {}.".format(docname, annotation, offset),
                     type="sphinx-exhibit", subtype="embedding")
