@@ -146,6 +146,8 @@ def split_text_and_code_blocks(src):
             # the beginning would invalidate node.get_lineno().
             nodes[0].prefix = ""
             string = "".join(map(str, nodes)).rstrip("\n") + "\n"
+        else:
+            assert False
         yield tp, string, linenos[0]
 
 
@@ -820,6 +822,8 @@ def generate_notebook(app, docname):
             # newline as a blank line.
             cells.append(nbformat.v4.new_code_cell(
                 next(code_blocks).rstrip("\n")))
+        else:
+            assert False
         # In the remainder tree, delete everything up to and including the sep.
         root = remainder
         # The same elem as above, but in the remainder tree.
