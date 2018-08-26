@@ -15,14 +15,13 @@ setup(
     package_dir={"": "lib"},
     ext_modules=[],
     package_data={},
-    python_requires="",
+    python_requires=">=3.5",
     setup_requires=["setuptools_scm"],
     use_scm_version=lambda: {  # xref __init__.py
         "version_scheme": "post-release",
         "local_scheme": "node-and-date",
         "write_to": "lib/sphinx_exhibit/_version.py",
     },
-    python_requires=">=3.5",
     install_requires=[
         "lxml>=3.5",  # First to support Py3.5.
         "matplotlib>=2.0",  # Changed mpl.testing.decorators.cleanup.

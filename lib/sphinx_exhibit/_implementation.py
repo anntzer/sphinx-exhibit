@@ -354,7 +354,9 @@ def get_docref(obj, source_name, parent=None):
         return None
     if isinstance(obj, ModuleType):
         return DocRef("py:module", (obj.__name__,))
-    if not (hasattr(obj, "__module__") and hasattr(obj, "__qualname__")):
+    if not (hasattr(obj, "__module__")
+            and hasattr(obj, "__qualname__")
+            and obj.__qualname__.split(".")[-1] == source_name):
         return None
     lookups = ((obj.__module__ + "." + obj.__qualname__, obj.__qualname__)
                if obj.__module__ is not None
@@ -550,7 +552,7 @@ class ExhibitBlock(SourceGetterMixin):
         env = self.state.document.settings.env
         doc_info = env.exhibit_state.docnames[env.docname]
         current_source = self.get_current_source()
-        lines = ([".. code-block:: python", ""] +
+        lines = ([".. code-block:: python3", ""] +
                  ["   " + line for line in self.content] +
                  [""])
         block_idx = int(self.arguments[0])
@@ -849,7 +851,7 @@ def embed_annotations(app, docname):
 
     tree = lxml.html.parse(str(html_path))
     elems = tree.findall(
-        ".//div[@class='highlight-python notranslate']/div/pre")
+        ".//div[@class='highlight-python3 notranslate']/div/pre")
     offset = 0
     offset_to_elem = {}
 
@@ -865,6 +867,11 @@ def embed_annotations(app, docname):
         visit(elem)
 
     for offset, annotation in annotations.items():
+        if not annotation.href:
+            continue
+
+        expected_text = (_util.item(_util.item(annotation.docrefs).lookups)
+                         .split(".")[-1])
         try:
             elem = offset_to_elem[offset]
             expected_prefix = ""
@@ -872,25 +879,19 @@ def embed_annotations(app, docname):
             # Should be a decorator.
             # NOTE: Although the grammar theoretically allows whitespace after
             # the "@", this is never seen in practice and more importantly not
-            # parsed correctly by pygments anyways.
+            # parsed correctly by pygments anyways.  Still, fail gracefully in
+            # that case.
             try:
                 elem = offset_to_elem[offset - 1]
                 expected_prefix = "@"
             except KeyError:
-                # Can happen with composite decorators... upgrade to warning
-                # once that case is fixed.
                 _log.info(
                     "In {}, dropping annotation {} not matching highlighting "
                     "at offset {}.".format(docname, annotation, offset),
                     type="sphinx-exhibit", subtype="embedding")
                 continue
 
-        if not annotation.href:
-            continue
-        assert elem.text == (
-            expected_prefix
-            + _util.item(_util.item(annotation.docrefs).lookups)
-              .split(".")[-1])
+        assert elem.text == expected_prefix + expected_text
         link = lxml.html.Element("a", href=fix_rel_href(annotation.href))
         link.text = elem.text
         elem.text = ""
