@@ -282,7 +282,7 @@ class Exhibit(SourceGetterMixin):
             else:
                 if line.startswith(r"\!"):
                     line = line[1:]
-                added = sorted(src_dir.glob(line))
+                added = sorted(set(src_dir.glob(line)).difference(src_paths))
                 # Log just once.
                 if env.exhibit_state.stage is Stage.RstGeneration:
                     _log.debug("expanding (for addition) %s (in %s) to %s.",
