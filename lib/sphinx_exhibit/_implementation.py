@@ -742,8 +742,12 @@ class TransformExhibitBackrefs(SphinxTransform):
 
 
 def env_merge_info(app, env, docnames, other):
-    for path, other_info in other.exhibit_state.paths.items():
-        info = env.state.exhibit_state.paths[path]
+    for docname in docnames:
+        try:
+            info = env.exhibit_state.docnames[docname]
+        except KeyError:
+            continue
+        other_info = other.exhibit_state.docnames[docname]
         info.merge(other_info)
 
 
