@@ -1,5 +1,4 @@
 # FIXME: Patch AbstractMovieWriter.saving.
-#
 # FIXME: Upstream fix to sphinx-jinja.
 
 import ast
@@ -99,10 +98,11 @@ def builder_inited(app):
             # document (e.g. when generating contents with .. jinja::), so
             # stash the docname in the env.
             env.prepare_settings(docname)
-            # FIXME: Add at least sphinx's default roles.
             # FIXME: Only publish the topmost block containing the exhibit.
-            docutils.core.publish_doctree(
-                contents, source_path=path, settings_overrides={"env": env})
+            # NOTE[backport]: sphinx 1.8's Environment.read_doc.
+            with sphinx.util.docutils.sphinx_domains(env), \
+                    sphinx.util.rst.default_role(docname, app.config.default_role):
+                doctree = sphinx.io.read_doc(app, env, env.doc2path(docname))
     app.env.exhibit_prev_state = \
         getattr(app.env, "exhibit_state", State(None, {}, {}))
     app.env.exhibit_state = \
