@@ -382,7 +382,6 @@ class ExhibitSource(SourceGetterMixin):
     option_spec = {
         "source": rst.directives.unchanged_required,
     }
-    has_content = True
 
     @staticmethod
     @contextlib.contextmanager
