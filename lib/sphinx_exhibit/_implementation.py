@@ -45,7 +45,7 @@ _deletion_notice = """\
 
 
 class Stage(Enum):
-    RstGeneration, ExampleExecution, ExecutionDone = range(3)
+    RstGeneration, ExhibitExecution, ExecutionDone = range(3)
 
 
 class Style(Enum):
@@ -106,7 +106,7 @@ def builder_inited(app):
     app.env.exhibit_prev_state = \
         getattr(app.env, "exhibit_state", State(None, {}, {}))
     app.env.exhibit_state = \
-        env.exhibit_state._replace(stage=Stage.ExampleExecution)
+        env.exhibit_state._replace(stage=Stage.ExhibitExecution)
     rst.directives.register_directive("exhibit-skip", ExhibitSkip)
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
@@ -161,6 +161,11 @@ def env_before_read_docs(app, env, docnames):
                         for path in block)):
             doc_info.merge(prev_info)
             docnames.remove(docname)
+    # Exhibits need to be run first because other docs may refer to the
+    # resulting plots.
+    docnames[:] = sorted(
+        docnames,
+        key=lambda docname: 0 if docname in env.exhibit_state.docnames else 1)
 
 
 def doc_info_from_py_source(src_path, *, syntax_style, output_style):
@@ -323,7 +328,7 @@ class Exhibit(SourceGetterMixin):
                                 str(dest_path.parent / src_path.name))
                 e_state.docnames[docname] = doc_info
             return []
-        else:  # Read stage, either ExampleExecution or ExecutionDone.
+        else:  # Read stage, either ExhibitExecution or ExecutionDone.
             cur_dir = self.get_current_source().parent
             lines = ([".. toctree::",
                       "   :titlesonly:",
