@@ -13,7 +13,7 @@ Activate by adding ``"sphinx_exhibit"`` in the list of extensions in your
       :srcdir: ../examples
       :destdir: examples
 
-      example_comes_first.py
+      this_example_comes_first.py
       *.py
 
 This will look up examples in ``srcdir`` (here, ``../examples``; relative to
@@ -35,6 +35,10 @@ By default, output images are named ``{filename}-{block_idx}-{figure_idx}.png``
 activated with ``:output-style: sphinx-gallery`` / ``exhibit_output_style =
 "sphinx-gallery"``.
 
+The *topmost* docstring can contain the ``.. exhibit-skip::`` directive (which
+takes no arguments and generates no output); if it is found there, the code
+will not be run.
+
 The list of examples that use a specific API element can be output using the
 ``.. exhibit-backrefs::`` directive, whose syntax is
 
@@ -45,3 +49,13 @@ The list of examples that use a specific API element can be output using the
 
 where the optional ``:title:`` is printed before the list if there is at least
 one of them.
+
+Development notes
+-----------------
+
+Sphinx-Exhibit uses its ``__version__`` (which comes from ``git describe
+-a``) as the environment version reported to Sphinx.  To prevent invalidation
+of an environment generated with a previous ``__version__``, set the
+``SPHINX_EXHIBIT_ENV_VERSION`` environment variable to the desired value.  Of
+course, things may not go so well if the format of the data stored internally
+by Sphinx-Exhibit *did* change.

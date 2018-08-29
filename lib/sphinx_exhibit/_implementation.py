@@ -1,6 +1,4 @@
 # FIXME: Patch AbstractMovieWriter.saving.
-#
-# FIXME: Upstream fix to sphinx-jinja.
 
 import ast
 from collections import ChainMap, namedtuple
@@ -921,6 +919,7 @@ def setup(app):
     app.connect("env-merge-info", env_merge_info)
     app.connect("build-finished", build_finished)
     return {"version": __version__,
-            "env_version": 0,
+            "env_version": (os.environ.get("SPHINX_EXHIBIT_ENV_VERSION")
+                            or __version__),
             "parallel_read_safe": True,
             "parallel_write_safe": True}
