@@ -105,9 +105,13 @@ def builder_inited(app):
         getattr(app.env, "exhibit_state", State(None, {}, {}))
     app.env.exhibit_state = \
         env.exhibit_state._replace(stage=Stage.ExhibitExecution)
+    # Public directives.
     rst.directives.register_directive("exhibit-skip", ExhibitSkip)
+    rst.directives.register_directive("exhibit-capture", ExhibitCapture)
+    # Internal use.
     rst.directives.register_directive("exhibit-source", ExhibitSource)
     rst.directives.register_directive("exhibit-block", ExhibitBlock)
+    # Public directives.
     rst.directives.register_directive("exhibit-backrefs", ExhibitBackrefs)
     app.add_node(exhibit_backrefs)
     app.add_post_transform(TransformExhibitBackrefs)
@@ -234,8 +238,7 @@ def doc_info_from_py_source(src_path, *, syntax_style, output_style):
         else:
             assert False
 
-    source_block = (".. exhibit-source::\n" +
-                    "   :source: {}\n".format(src_path))
+    source_block = ".. exhibit-source:: {}".format(src_path)
     text_blocks.insert(insert_source_block_at or 0, source_block)
 
     rst_source = "\n\n".join(text_blocks)
@@ -346,6 +349,14 @@ class ExhibitSkip(SourceGetterMixin):
         return []
 
 
+class ExhibitCapture(SourceGetterMixin):
+    required_arguments = 1
+    final_argument_whitespace = True
+
+    def run(self):
+        return []
+
+
 DocRef = namedtuple("DocRef", "role lookups")
 Annotation = namedtuple("Annotation", "docrefs href")
 
@@ -382,9 +393,8 @@ def get_docref(obj, source_name, parent=None):
 
 
 class ExhibitSource(SourceGetterMixin):
-    option_spec = {
-        "source": rst.directives.unchanged_required,
-    }
+    required_arguments = 1
+    final_argument_whitespace = True
 
     @staticmethod
     @contextlib.contextmanager
@@ -414,7 +424,7 @@ class ExhibitSource(SourceGetterMixin):
             return []
 
         mod = _offset_annotator.parse(
-            self.options["source"],
+            self.arguments[0],
             [idx for code_line_range in doc_info.code_line_ranges
              for idx in code_line_range])
 
@@ -463,7 +473,7 @@ class ExhibitSource(SourceGetterMixin):
                     lineno=lineno))
             mod.body.append(inserted)
         mod.body.sort(key=lambda stmt: stmt.lineno)
-        code = compile(mod, self.options["source"], "exec")
+        code = compile(mod, self.arguments[0], "exec")
 
         def sphinx_exhibit_name(obj, name, offset):
             docref = get_docref(obj, name)
@@ -527,7 +537,7 @@ class ExhibitSource(SourceGetterMixin):
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
         with self._patch_mpl_interactivity(), \
-                _util.chdir_cm(Path(self.options["source"]).parent), \
+                _util.chdir_cm(Path(self.arguments[0]).parent), \
                 warnings.catch_warnings(), \
                 contextlib.redirect_stdout(stream), \
                 contextlib.redirect_stderr(stream):
@@ -537,7 +547,7 @@ class ExhibitSource(SourceGetterMixin):
                     {name_func_name: sphinx_exhibit_name,
                      attr_func_name: sphinx_exhibit_attr,
                      export_func_name: sphinx_exhibit_export,
-                     "__file__": self.options["source"],
+                     "__file__": self.arguments[0],
                      "__name__": "__main__"}))()
             except (Exception, SystemExit) as e:
                 _log.warning("%s raised %s: %s",
