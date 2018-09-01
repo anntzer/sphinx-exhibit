@@ -258,13 +258,6 @@ class SourceGetterMixin(rst.Directive):
 
 
 class Exhibit(SourceGetterMixin):
-    option_spec = {
-        "srcdir": rst.directives.unchanged_required,
-        "destdir": rst.directives.unchanged,
-        "syntax-style": Style,
-        "output-style": Style,
-    }
-    has_content = True
 
     def get_src_paths_and_docnames(self):
         env = self.state.document.settings.env
@@ -303,14 +296,20 @@ class Exhibit(SourceGetterMixin):
                  .with_suffix("").as_posix())
                 for src_path in src_paths]
 
-    def run(self):
+    @_util.directive_runner(has_content=True)
+    def run(self, *,
+            srcdir: Path,
+            destdir: Path = os.curdir,
+            syntax_style: Style = None,
+            output_style: Style = None,
+            ):
         env = self.state.document.settings.env
-
-        self.options.setdefault("destdir", os.curdir)
-        self.options.setdefault(
-            "syntax-style", Style(env.config.exhibit_syntax_style))
-        self.options.setdefault(
-            "output-style", Style(env.config.exhibit_output_style))
+        if syntax_style is None:
+            syntax_style = self.options["syntax-style"] = \
+                Style(env.config.exhibit_syntax_style)
+        if output_style is None:
+            output_style = self.options["output-style"] = \
+                Style(env.config.exhibit_output_style)
 
         e_state = env.exhibit_state
         if e_state.stage is Stage.RstGeneration:
@@ -350,10 +349,8 @@ class ExhibitSkip(SourceGetterMixin):
 
 
 class ExhibitCapture(SourceGetterMixin):
-    required_arguments = 1
-    final_argument_whitespace = True
-
-    def run(self):
+    @_util.directive_runner(final_argument_whitespace=True)
+    def run(self, path: Path):
         return []
 
 
@@ -393,9 +390,6 @@ def get_docref(obj, source_name, parent=None):
 
 
 class ExhibitSource(SourceGetterMixin):
-    required_arguments = 1
-    final_argument_whitespace = True
-
     @staticmethod
     @contextlib.contextmanager
     def _patch_mpl_interactivity():
@@ -411,7 +405,8 @@ class ExhibitSource(SourceGetterMixin):
             FigureCanvasBase.start_event_loop = start_event_loop
             FigureManagerBase.show = show
 
-    def run(self):
+    @_util.directive_runner(final_argument_whitespace=True)
+    def run(self, src_path: Path):
         env = self.state.document.settings.env
         if env.exhibit_state.stage is Stage.ExecutionDone:
             _log.warning(
@@ -424,7 +419,7 @@ class ExhibitSource(SourceGetterMixin):
             return []
 
         mod = _offset_annotator.parse(
-            self.arguments[0],
+            src_path,
             [idx for code_line_range in doc_info.code_line_ranges
              for idx in code_line_range])
 
@@ -473,7 +468,7 @@ class ExhibitSource(SourceGetterMixin):
                     lineno=lineno))
             mod.body.append(inserted)
         mod.body.sort(key=lambda stmt: stmt.lineno)
-        code = compile(mod, self.arguments[0], "exec")
+        code = compile(mod, str(src_path), "exec")
 
         def sphinx_exhibit_name(obj, name, offset):
             docref = get_docref(obj, name)
@@ -537,7 +532,7 @@ class ExhibitSource(SourceGetterMixin):
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
         with self._patch_mpl_interactivity(), \
-                _util.chdir_cm(Path(self.arguments[0]).parent), \
+                _util.chdir_cm(src_path.parent), \
                 warnings.catch_warnings(), \
                 contextlib.redirect_stdout(stream), \
                 contextlib.redirect_stderr(stream):
@@ -547,7 +542,7 @@ class ExhibitSource(SourceGetterMixin):
                     {name_func_name: sphinx_exhibit_name,
                      attr_func_name: sphinx_exhibit_attr,
                      export_func_name: sphinx_exhibit_export,
-                     "__file__": self.arguments[0],
+                     "__file__": str(src_path),
                      "__name__": "__main__"}))()
             except (Exception, SystemExit) as e:
                 _log.warning("%s raised %s: %s",
@@ -559,17 +554,14 @@ class ExhibitSource(SourceGetterMixin):
 
 
 class ExhibitBlock(SourceGetterMixin):
-    required_arguments = 1
-    has_content = True
-
-    def run(self):
+    @_util.directive_runner(has_content=True)
+    def run(self, block_idx: int):
         env = self.state.document.settings.env
         doc_info = env.exhibit_state.docnames[env.docname]
         current_source = self.get_current_source()
         lines = ([".. code-block:: python3", ""] +
                  ["   " + line for line in self.content] +
                  [""])
-        block_idx = int(self.arguments[0])
         lines.extend([
             ".. raw:: html",
             "",
@@ -695,14 +687,8 @@ class exhibit_backrefs(rst.nodes.Element):
 
 
 class ExhibitBackrefs(rst.Directive):
-    required_arguments = 2
-    option_spec = {
-        "title": rst.directives.unchanged,
-    }
-
-    def run(self):
-        role, name = self.arguments
-        title = self.options.get("title", "")
+    @_util.directive_runner
+    def run(self, role, name, *, title=""):
         # Parse the title now that this can easily be done, and remove it later
         # if it turns out to be unneeded.
         node = rst.nodes.Element()
