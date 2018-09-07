@@ -532,10 +532,10 @@ class ExhibitSource(SourceGetterMixin):
         # Prevent Matplotlib's cleanup decorator from destroying the warnings
         # filters.
         with self._patch_mpl_interactivity(), \
-                _util.chdir_cm(src_path.parent), \
-                warnings.catch_warnings(), \
-                contextlib.redirect_stdout(stream), \
-                contextlib.redirect_stderr(stream):
+             _util.chdir_cm(src_path.parent), \
+             warnings.catch_warnings(), \
+             contextlib.redirect_stdout(stream), \
+             contextlib.redirect_stderr(stream):
             try:
                 mpl.testing.decorators.cleanup("default")(lambda: exec(
                     code,
