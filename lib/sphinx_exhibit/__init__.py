@@ -1,12 +1,11 @@
-try:
-    import setuptools_scm
-    __version__ = setuptools_scm.get_version(  # xref setup.py
-        root="../..", relative_to=__file__,
-        version_scheme="post-release", local_scheme="node-and-date")
-except (ImportError, LookupError):
-    try:
-        from ._version import version as __version__
-    except ImportError:
-        pass
+import importlib.metadata
 
 from ._implementation import setup
+
+
+try:
+    __version__ = importlib.metadata.version("sphinx_exhibit")
+except ImportError:
+    __version__ = "0+unknown"
+
+__all__ = ["setup"]
